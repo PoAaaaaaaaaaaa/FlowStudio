@@ -33,21 +33,43 @@ object CrashGuard {
     var lastCrashSummary: String? = null
         private set
 
+    /** 上一级的处理器，链式调用以保留系统本身的崩溃流程 */
+    @Volatile
+    private var previousHandler: Thread.UncaughtExceptionHandler? = null
+
     fun install(context: Context) {
         val app = context.applicationContext
 
-        // 读取上次的崩溃记录（在装钩子之前，避免覆盖）
+        // 先读上次的崩溃记录，再装钩子（否则会被新记录覆盖）
         lastCrashSummary = readLastCrash(app)
 
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        // 必须先抓住当前的处理器，再设新的。顺序反了的话
+        // previousHandler 永远是 null，系统那层就断了。
+        previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            val name = thread.name ?: ""
+
+            // 辅助线程的崩溃不该带走用户的工程。
+            //
+            // 真实事故：桥接服务处理一个已经断开的 HTTP 连接时抛
+            // SocketException: Broken pipe，从 respond() 冒到线程池，
+            // 变成 FATAL EXCEPTION: flow-bridge，整个应用被杀，
+            // 用户正在编的曲全没了。
+            //
+            // 后台线程的死只影响那一条连接，应用必须继续跑。
+            if (name.startsWith("flow-bridge") || name.startsWith("flow-io")) {
+                Log.e(TAG, "辅助线程 [$name] 崩溃，已隔离，应用继续运行", error)
+                return@setDefaultUncaughtExceptionHandler
+            }
+
             try {
                 save(app, thread, error)
             } catch (t: Throwable) {
-                Log.e(TAG, "写崩溃日志本身失败了", t)
+                Log.e(TAG, "写崩溃日志本身失败", t)
             }
-            // 交回系统处理，保持正常的崩溃流程（不要假装没事）
-            previous?.uncaughtException(thread, error)
+            // 主线程的问题仍然交给系统正常处理（不要假装没事）
+            previousHandler?.uncaughtException(thread, error)
         }
     }
 

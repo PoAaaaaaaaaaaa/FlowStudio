@@ -80,7 +80,11 @@ class StudioBridge(
 
     /** 广播一条事件给所有订阅者 */
     fun broadcast(type: String, data: JSONObject) {
-        if (subscribers.isEmpty()) return
+        if (subscribers.isEmpty()) {
+            Log.d(TAG, "广播 $type：没有订阅者")
+            return
+        }
+        Log.d(TAG, "广播 $type 给 ${subscribers.size} 个订阅者")
         val payload = buildString {
             append("data: ")
             append(JSONObject().put("type", type)
@@ -107,8 +111,25 @@ class StudioBridge(
 
     private var server: ServerSocket? = null
     private val stop = AtomicBoolean(false)
-    private val pool = Executors.newFixedThreadPool(4) { r ->
+    /**
+     * 处理短请求的线程池。
+     *
+     * 原来是固定 4 个线程 —— 这个数字是致命的：几个慢请求就能把池子占满，
+     * 之后所有请求（包括 /ping）都在队列里排队，表现为"整个桥接卡死"。
+     * 实测中 4 个线程被占住后，连读 /status 都要等到超时。
+     */
+    private val pool = Executors.newFixedThreadPool(8) { r ->
         Thread(r, "flow-bridge").apply { isDaemon = true }
+    }
+
+    /**
+     * SSE 长连接单独一组线程。
+     *
+     * 订阅是长期占用（一直到客户端断开），绝不能和短请求抢同一个池，
+     * 否则一个订阅就能挤掉一整格并发能力。
+     */
+    private val streamPool = Executors.newCachedThreadPool { r ->
+        Thread(r, "flow-bridge-sse").apply { isDaemon = true }
     }
 
     /**
@@ -145,10 +166,18 @@ class StudioBridge(
                 }
             }
             for (m in mirrors) {
-                runCatching {
+                val ok = runCatching {
                     m.parentFile?.mkdirs()
                     val cur = if (m.isFile) m.readText().trim() else null
                     if (cur != t) m.writeText(t)
+                    m.isFile && m.length() > 0
+                }.getOrDefault(false)
+                // 镜像是"插件能不能连上"的前提，失败必须留下痕迹，
+                // 否则只剩一句"连不上"，排查时无从下手。
+                if (ok) {
+                    android.util.Log.i(TAG, "令牌已镜像到 ${m.absolutePath}")
+                } else {
+                    android.util.Log.w(TAG, "令牌镜像失败: ${m.absolutePath}")
                 }
             }
         }
@@ -166,6 +195,14 @@ class StudioBridge(
     fun start(preferredPort: Int = DEFAULT_PORT): Boolean {
         if (running) return true
         stop.set(false)
+
+        // 主动求值一次令牌。
+        //
+        // token 是 by lazy 的，镜像到外部目录的副作用写在初始化块里。
+        // 如果没有人访问过 token，那段副作用永远不会执行 ——
+        // 表现就是"桥接在跑，但外部工具找不到令牌文件，插件连不上"。
+        // 这里的取值不是多余的：它就是触发那段初始化。
+        runCatching { token.length }
         var bound: ServerSocket? = null
         var p = preferredPort
         // 端口被占就往后找，最多试 10 个
@@ -191,7 +228,21 @@ class StudioBridge(
             while (!stop.get()) {
                 try {
                     val client = bound.accept()
-                    pool.execute { handle(client) }
+                    // 每一个连接都必须被完全隔离。
+                    //
+                    // 之前这里没有 try/catch：客户端提前断开会抛
+                    // SocketException: Broken pipe，从 respond() 一路冒到
+                    // ThreadPoolExecutor，直接 FATAL EXCEPTION: flow-bridge
+                    // —— 整个应用被杀。一个断开的连接不该让用户丢掉正在编的曲。
+                    pool.execute {
+                        try {
+                            handle(client)
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "处理连接时出错（已隔离）: ${t.javaClass.simpleName}: ${t.message}")
+                        } finally {
+                            runCatching { client.close() }
+                        }
+                    }
                 } catch (t: Throwable) {
                     if (!stop.get()) Log.w(TAG, "accept 失败: ${t.message}")
                 }
@@ -210,9 +261,14 @@ class StudioBridge(
     // ---------------------------------------------------------------- 请求处理
 
     private fun handle(client: Socket) {
-        client.use { s ->
-            s.soTimeout = 8000
-            val input = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
+        var s: Socket? = client
+        try {
+            s = client
+            // 读超时要比"等主线程"的上限更长，否则主线程还在干活，
+            // 这边的 socket 已经超时断开，客户端只会看到一个空响应。
+            client.soTimeout = 20000
+
+            val input = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
             val requestLine = input.readLine() ?: return
             val parts = requestLine.split(" ")
             if (parts.size < 2) return
@@ -244,23 +300,41 @@ class StudioBridge(
                 String(buf, 0, read)
             } else ""
 
-            val out = s.getOutputStream()
-            try {
-                val (status, payload) = route(method, pathWithQuery, body, authHeader)
-                if (status == -1) {
-                    streamEvents(out, pathWithQuery)
-                } else {
-                    respond(out, status, payload)
+            val out = client.getOutputStream()
+            val (status, payload) = route(method, pathWithQuery, body, authHeader)
+
+            if (status == -1) {
+                // ---- SSE ----
+                // 这条连接的生命周期归流线程管，不能在这里关。
+                // 之前用 client.use { } 包住整个 handle，handle 一返回
+                // socket 就被关了，流线程拿到的是死连接 —— 连 hello 都发不出去。
+                val held = client
+                s = null   // 交出所有权，finally 不再关
+                streamPool.execute {
+                    try {
+                        streamEvents(out, pathWithQuery)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "SSE 中断: ${t.javaClass.simpleName}: ${t.message}")
+                    } finally {
+                        runCatching { held.close() }
+                    }
                 }
-            } catch (t: Throwable) {
-                Log.e(TAG, "处理 ${method} $pathWithQuery 出错", t)
-                respond(out, 500, JSONObject().put("error", t.message ?: t.javaClass.simpleName))
+                return
             }
+
+            respond(out, status, payload)
+        } catch (t: Throwable) {
+            Log.e(TAG, "处理连接出错: ${t.javaClass.simpleName}: ${t.message}")
+        } finally {
+            // s 为 null 表示所有权已移交给 SSE 线程
+            s?.let { runCatching { it.close() } }
         }
     }
 
     private fun respond(out: OutputStream, status: Int, body: JSONObject) {
         val bytes = body.toString().toByteArray(Charsets.UTF_8)
+        // 客户端可能在我们写完之前就断开了（curl -m 超时、浏览器刷新、插件重连）。
+        // 这是正常情况，不是错误 —— 绝不能让它变成崩溃。
         val header = buildString {
             append("HTTP/1.1 $status ${reason(status)}\r\n")
             append("Content-Type: application/json; charset=utf-8\r\n")
@@ -269,9 +343,14 @@ class StudioBridge(
             append("Cache-Control: no-store\r\n")
             append("\r\n")
         }
-        out.write(header.toByteArray(Charsets.US_ASCII))
-        out.write(bytes)
-        out.flush()
+        try {
+            out.write(header.toByteArray(Charsets.US_ASCII))
+            out.write(bytes)
+            out.flush()
+        } catch (t: Throwable) {
+            // 远端已断开。忽略：数据没送到是客户端的选择，服务端保持存活。
+            Log.d(TAG, "响应写入失败（客户端已断开）: ${t.javaClass.simpleName}")
+        }
     }
 
     private fun reason(code: Int) = when (code) {
@@ -292,7 +371,15 @@ class StudioBridge(
         val path = if (qIdx >= 0) pathWithQuery.substring(0, qIdx) else pathWithQuery
         val query = if (qIdx >= 0) parseQuery(pathWithQuery.substring(qIdx + 1)) else emptyMap()
 
-        // 健康检查不需要令牌，方便插件先探活
+        // 探活与只读概览不需要令牌。
+        //
+        // /status 只暴露"引擎在不在、音频流起没起、工程多长"这类不敏感数字，
+        // 拿到它也无法修改任何东西。让插件能先确认"连得上、版本对、有没有声音"，
+        // 再去要令牌做写操作 —— 否则第一次连不上时用户看到的就是"全都不行"。
+        if (path == "/status" && method == "GET") {
+            return 200 to snapshot.summary()
+        }
+
         if (path == "/ping") {
             return 200 to JSONObject()
                 .put("ok", true)
@@ -323,32 +410,38 @@ class StudioBridge(
                 method == "PUT" && path == "/project" -> handlePutProject(body, query)
                 method == "GET" && path == "/transport" -> 200 to transportJson()
                 method == "POST" && path == "/transport/play" -> {
-                    session.play()
-                    broadcast("transport", transportJson())
-                    200 to transportJson()
+                    val ok = runOnMain { session.play() }
+                    if (!ok) return 503 to JSONObject().put("error", "应用繁忙，播放没启动")
+                    broadcast("transport", onMainThread { transportJson() } ?: transportJson())
+                    200 to (onMainThread { transportJson() } ?: transportJson())
                 }
                 method == "POST" && path == "/transport/pause" -> {
-                    session.pause()
-                    broadcast("transport", transportJson())
-                    200 to transportJson()
+                    runOnMain { session.pause() }
+                    val t = onMainThread { transportJson() } ?: transportJson()
+                    broadcast("transport", t)
+                    200 to t
                 }
                 method == "POST" && path == "/transport/stop" -> {
-                    session.stop()
-                    broadcast("transport", transportJson())
-                    200 to transportJson()
+                    runOnMain { session.stop() }
+                    val t = onMainThread { transportJson() } ?: transportJson()
+                    broadcast("transport", t)
+                    200 to t
                 }
                 method == "POST" && path == "/transport/seek" -> {
                     val tick = query["tick"]?.toIntOrNull() ?: 0
-                    session.seek(tick)
-                    200 to transportJson()
+                    runOnMain { session.seek(tick) }
+                    200 to (onMainThread { transportJson() } ?: transportJson())
                 }
                 method == "POST" && path == "/bpm" -> {
                     val v = query["value"]?.toFloatOrNull()
                         ?: runCatching { JSONObject(body).optDouble("value").toFloat() }.getOrNull()
                         ?: return 400 to JSONObject().put("error", "缺少 value")
-                    session.project.bpm = v.coerceIn(20f, 300f)
-                    session.pushBpm()
-                    200 to JSONObject().put("bpm", session.project.bpm)
+                    val bpm = onMainThread {
+                        session.project.bpm = v.coerceIn(20f, 300f)
+                        session.pushBpm()
+                        session.project.bpm
+                    } ?: return 503 to JSONObject().put("error", "应用繁忙")
+                    200 to JSONObject().put("bpm", bpm)
                 }
                 method == "GET" && path == "/tracks" -> 200 to tracksJson()
                 method == "POST" && path == "/tracks" -> handleAddTrack(body)
@@ -373,9 +466,7 @@ class StudioBridge(
                 method == "POST" && path == "/note/on" -> handleNoteOn(body)
                 method == "POST" && path == "/note/off" -> handleNoteOff(body)
                 method == "POST" && path == "/save" -> {
-                    session.save(null) { ok ->
-                        Log.i(TAG, "保存: $ok")
-                    }
+                    runOnMain { session.save(null) { ok -> Log.i(TAG, "保存: $ok") } }
                     200 to JSONObject().put("saving", true)
                 }
                 method == "GET" && path == "/projects" -> 200 to projectsJson()
@@ -476,6 +567,54 @@ class StudioBridge(
             android.util.Log.i("FlowBridge", "SSE 订阅 -1，剩余 ${subscribers.size} 个")
         }
     }
+
+    // ---------------------------------------------------------------- 线程边界
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * 在 UI 线程上执行一段操作并等它完成。
+     *
+     * 桥接的所有写操作都必须走这里。原因：
+     *   - session 的方法会改工程、推引擎、触发 onLoaded 刷新 View，
+     *     这些只能在主线程做，否则抛 CalledFromWrongThreadException；
+     *   - play() 会注册音频回调，从服务线程做会互相等，请求永远不返回。
+     *
+     * 带超时：主线程忙的时候不能让 HTTP 请求无限挂着。
+     * 超时返回 null，调用方据此报"应用忙"而不是假成功。
+     */
+    private fun <T> onMainThread(timeoutMs: Long = 6000, block: () -> T): T? {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            return runCatching(block).getOrNull()
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var result: T? = null
+        var error: Throwable? = null
+        val posted = mainHandler.post {
+            try {
+                result = block()
+            } catch (t: Throwable) {
+                error = t
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!posted) return null
+        val done = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        if (!done) {
+            Log.w(TAG, "主线程操作超时（${timeoutMs}ms）")
+            return null
+        }
+        error?.let {
+            Log.e(TAG, "主线程操作抛异常", it)
+            return null
+        }
+        return result
+    }
+
+    /** 不需要返回值的版本 */
+    private fun runOnMain(timeoutMs: Long = 6000, block: () -> Unit): Boolean =
+        onMainThread(timeoutMs) { block(); true } ?: false
 
     private fun checkAuth(header: String?): Boolean {
         if (header == null) return false
@@ -612,7 +751,9 @@ class StudioBridge(
         if (loaded.patterns.isEmpty()) {
             return 400 to JSONObject().put("error", "工程里没有样式")
         }
-        session.replaceProject(loaded)
+        var applied = false
+        session.replaceProject(loaded) { okApp -> applied = okApp }
+
         bumpRevision()
         broadcast("project", JSONObject()
             .put("name", loaded.name)
@@ -620,6 +761,7 @@ class StudioBridge(
             .put("patterns", loaded.patterns.size))
         return 200 to JSONObject()
             .put("ok", true)
+            .put("applied", applied)
             .put("revision", revision)
             .put("name", loaded.name)
             .put("tracks", loaded.tracks.size)
@@ -636,8 +778,7 @@ class StudioBridge(
         }
         val name = o.optString("name", inst.cn)
         val idx = session.project.addTrack(inst, name)
-        session.pushAll()
-        session.scheduleAutoSave()
+        runOnMain { session.pushAll(); session.scheduleAutoSave() }
         return 200 to JSONObject().put("ok", true).put("index", idx).put("name", name)
     }
 
@@ -676,8 +817,7 @@ class StudioBridge(
             }
         }
 
-        session.pushTrack(index)
-        session.scheduleAutoSave()
+        runOnMain { session.pushTrack(index); session.scheduleAutoSave() }
         broadcast("track", JSONObject().put("index", index))
         return 200 to JSONObject().put("ok", true).put("index", index)
     }
@@ -697,8 +837,7 @@ class StudioBridge(
             session.project.patterns.add(pat)
             session.project.nextPatternId = maxOf(session.project.nextPatternId, id + 1)
         }
-        session.pushAll()
-        session.scheduleAutoSave()
+        runOnMain { session.pushAll(); session.scheduleAutoSave() }
         return 200 to JSONObject()
             .put("ok", true)
             .put("id", pat.id)
@@ -741,8 +880,7 @@ class StudioBridge(
         }
         list.sortBy { it.start }
 
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         bumpRevision()
         broadcast("pattern", JSONObject()
             .put("patternId", patId).put("track", trackIdx).put("notes", list.size))
@@ -782,8 +920,7 @@ class StudioBridge(
             added++
         }
         list.sortBy { it.start }
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         bumpRevision()
         return 200 to JSONObject().put("ok", true).put("added", added).put("revision", revision)
     }
@@ -824,8 +961,7 @@ class StudioBridge(
                 removed += before - list.size
             }
         }
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         bumpRevision()
         return 200 to JSONObject().put("ok", true).put("removed", removed).put("revision", revision)
     }
@@ -876,8 +1012,7 @@ class StudioBridge(
             }
             list.sortBy { it.start }
         }
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         bumpRevision()
         return 200 to JSONObject().put("ok", true).put("touched", touched).put("revision", revision)
     }
@@ -897,15 +1032,15 @@ class StudioBridge(
                 return 200 to JSONObject().put("ok", true).put("played", 0)
             }
             // 用第一条音符的音高起头，快速给个听觉反馈
-            session.previewNote(trackIdx, notes.first().pitch, notes.first().velocity,
-                (pat.lengthTicks).coerceAtMost(Note.BAR))
+            runOnMain { session.previewNote(trackIdx, notes.first().pitch, notes.first().velocity,
+                (pat.lengthTicks).coerceAtMost(Note.BAR)) }
             return 200 to JSONObject().put("ok", true).put("played", notes.size)
         }
 
         val pitch = o.optInt("pitch", 60)
         val vel = o.optInt("velocity", 100)
         val dur = o.optInt("duration", Note.STEP * 4)
-        session.previewNote(trackIdx, pitch, vel, dur)
+        runOnMain { session.previewNote(trackIdx, pitch, vel, dur) }
         return 200 to JSONObject().put("ok", true).put("pitch", pitch)
     }
 
@@ -929,8 +1064,7 @@ class StudioBridge(
             offset = o.optInt("offset", 0)
         )
         p.clips.add(c)
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         return 200 to JSONObject().put("ok", true).put("id", c.id)
     }
 
@@ -938,8 +1072,7 @@ class StudioBridge(
         if (id == null) return 400 to JSONObject().put("error", "片段 id 不合法")
         val removed = session.project.clips.removeAll { it.id == id }
         if (!removed) return 404 to JSONObject().put("error", "没有 id=$id 的片段")
-        session.pushBpm()
-        session.scheduleAutoSave()
+        runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         return 200 to JSONObject().put("ok", true)
     }
 
@@ -949,14 +1082,14 @@ class StudioBridge(
         val pitch = o.optInt("pitch", 60)
         val vel = o.optInt("velocity", 100)
         val dur = o.optInt("duration", Note.STEP * 4)
-        session.previewNote(track, pitch, vel, dur)
+        runOnMain { session.previewNote(track, pitch, vel, dur) }
         return 200 to JSONObject().put("ok", true)
     }
 
     private fun handleNoteOff(body: String): Pair<Int, JSONObject> {
         val track = if (body.isBlank()) session.project.selectedTrack
         else JSONObject(body).optInt("track", session.project.selectedTrack)
-        session.releaseNote(track)
+        runOnMain { session.releaseNote(track) }
         return 200 to JSONObject().put("ok", true)
     }
 
@@ -965,7 +1098,8 @@ class StudioBridge(
         val name = o.optString("name", "")
         val file = session.listProjects().firstOrNull { it.nameWithoutExtension == name }
             ?: return 404 to JSONObject().put("error", "没有名为 $name 的工程")
-        session.load(file) { ok -> Log.i(TAG, "打开工程 $name: $ok") }
+        val ok = runOnMain { session.load(file) { r -> Log.i(TAG, "打开工程 $name: $r") } }
+        if (!ok) return 503 to JSONObject().put("error", "应用繁忙，加载没开始")
         return 200 to JSONObject().put("ok", true).put("loading", name)
     }
 }

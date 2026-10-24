@@ -265,15 +265,60 @@ class StudioSession(private val context: Context) {
     }
 
     /** 外部（桥接/插件）整体替换工程。保持传输位置，避免听起来突然跳。 */
-    fun replaceProject(incoming: Project) {
-        val wasPlaying = isPlaying()
-        stopPlayback()
-        project = incoming
-        currentFile = null
-        pushAll()
-        runCatching { onLoaded?.invoke(project) }
-        if (wasPlaying) play()
-        scheduleAutoSave()
+    /**
+     * 整体替换工程。
+     *
+     * 必须切回主线程做，原因有两个：
+     *   1. onLoaded 回调里是 UI 刷新（refreshAll 直接改 View），
+     *      非主线程调用会抛 CalledFromWrongThreadException；
+     *   2. play() 会启动音频流，涉及 AudioTrack/AAudio 的系统回调注册，
+     *      在桥接线程上做会和服务线程互相等，表现为请求一直不返回。
+     *
+     * 桥接那边是"同步等结果"的，所以这里用主线程 + 超时等待，
+     * 超时也要返回，不能让 HTTP 请求永远挂着。
+     */
+    fun replaceProject(incoming: Project, onDone: ((Boolean) -> Unit)? = null) {
+        val body = {
+            runCatching {
+                val wasPlaying = isPlaying()
+                stopPlayback()
+                project = incoming
+                currentFile = null
+                pushAll()
+                onLoaded?.invoke(project)
+                if (wasPlaying) play()
+                scheduleAutoSave()
+                true
+            }.getOrElse {
+                android.util.Log.e("FlowStudio", "替换工程失败", it)
+                false
+            }
+        }
+
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            onDone?.invoke(body())
+            return
+        }
+
+        // 桥接线程：投递到主线程并等待，最多 6 秒
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val ok = java.util.concurrent.atomic.AtomicBoolean(false)
+        val posted = main.post {
+            try {
+                ok.set(body())
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!posted) {
+            onDone?.invoke(false)
+            return
+        }
+        val finished = latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
+        if (!finished) {
+            android.util.Log.w("FlowStudio", "替换工程超时（主线程繁忙）")
+        }
+        onDone?.invoke(finished && ok.get())
     }
 
     /** 供桥接服务显示在 /ping 里 */
