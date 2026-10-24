@@ -63,6 +63,8 @@ jobs:
             engine/test/host_test.cpp \
             -o /tmp/engine_test
           /tmp/engine_test
+          # 上面必须全绿才算过：这里的回归测试覆盖了"播放无声"那类
+          # 渲染循环根本没跑的问题，光编译通过不代表能出声。
 
       - name: 构建 Release APK
         run: |
