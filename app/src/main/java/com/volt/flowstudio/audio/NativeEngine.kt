@@ -1,5 +1,7 @@
 package com.volt.flowstudio.audio
 
+import com.volt.flowstudio.NativeLib
+
 /**
  * 原生引擎的 Kotlin 门面。
  * 所有对时序敏感的东西（回调、混音、调度）都在 C++ 里；这里只是转发与缓存。
@@ -9,14 +11,26 @@ class NativeEngine private constructor() {
     companion object {
         @Volatile private var handle: Long = 0L
 
-        val instance: NativeEngine by lazy { NativeEngine() }
+        /**
+         * 单例。
+         *
+         * 1.0.0 用的是 `by lazy { NativeEngine() }`，它会在首次访问时生成一个
+         * lambda 类（NativeEngine$Companion$instance$2）并依赖 kotlin-stdlib 的
+         * SynchronizedLazyImpl。当时本地打包漏了 stdlib，这两个类一个在 dex 里
+         * 一个不在，构造阶段直接 NoClassDefFoundError，应用起不来。
+         *
+         * 改成饿汉式：没有 lambda、不依赖 Lazy 基础设施，类加载语义也更好预测。
+         */
+        private val INSTANCE: NativeEngine = NativeEngine()
 
-        fun loadLibrary(): Boolean = try {
-            System.loadLibrary("flowengine")
-            true
-        } catch (t: Throwable) {
-            false
-        }
+        val instance: NativeEngine get() = INSTANCE
+
+        /**
+         * 加载原生库。失败不抛异常，交给 [available] 判断。
+         * 实际的加载逻辑在 NativeLib 里（带 dlopen 回退与诊断信息）。
+         */
+        fun loadLibrary(context: android.content.Context): Boolean =
+            NativeLib.load(context)
     }
 
     /** 原生库是否加载成功。加载失败时所有方法都是安全的空操作。 */
@@ -25,10 +39,15 @@ class NativeEngine private constructor() {
 
     fun create(): Boolean {
         if (handle != 0L) return true
+        if (!NativeLib.loaded) {
+            available = false
+            return false
+        }
         available = try {
             handle = nativeCreate(0)
             handle != 0L
         } catch (t: Throwable) {
+            android.util.Log.e("FlowStudio", "nativeCreate 失败", t)
             false
         }
         return available

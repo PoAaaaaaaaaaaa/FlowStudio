@@ -17,6 +17,7 @@ SRC=(
   "$ROOT/engine/src/effect.cpp"
   "$ROOT/engine/src/engine.cpp"
   "$ROOT/engine/src/audio_android.cpp"
+  "$ROOT/engine/src/emutls_shim.cpp"
   "$ROOT/app/src/main/cpp/jni_bridge.cpp"
 )
 
@@ -41,6 +42,7 @@ CFLAGS=(
   -resource-dir="$TC/lib/clang/17"
   -std=c++17 -O2 -fPIC -fvisibility=hidden
   -ffunction-sections -fdata-sections
+  -mno-outline-atomics
   -I"$ROOT/engine/include" -I"$ROOT/app/src/main/cpp"
 )
 
@@ -52,14 +54,39 @@ for f in "${SRC[@]}"; do
   OBJS+=("$o")
 done
 
+# 原子操作兜底汇编：必须单独用 clang 汇编，不能直接丢给 ld.lld
+SHIM_SRC="$ROOT/engine/src/atomic_shim.s"
+SHIM_OBJ="$OBJ/atomic_shim.o"
+"${RUN[@]}" "$CLANG" --target=${ABI}26 --sysroot="$TC/sysroot" \
+  -resource-dir="$TC/lib/clang/17" -c "$SHIM_SRC" -o "$SHIM_OBJ"
+OBJS+=("$SHIM_OBJ")
+echo "   汇编兜底已编译"
+
 echo "[native] 链接 libflowengine.so"
+# libatomic.a 必须显式链进来：C++ 的 std::atomic 在 armv8.0 上会生成
+# __aarch64_swp1_acq_rel / __aarch64_ldadd8_acq_rel 这类调用，
+# 它们不在 libc 里。漏掉它，so 能编出来、能签名、能装，
+# 但一 dlopen 就报 "cannot locate symbol __aarch64_swp1_acq_rel"，应用起不来。
+CLANG_RT="$TC/lib/clang/17/lib/linux/aarch64"
 "${RUN[@]}" "$TC/bin/ld.lld" -shared \
   -o "$LIB/libflowengine.so" \
   "${OBJS[@]}" \
   -L"$TC/sysroot/usr/lib/$ABI/$API" \
   "$TC/sysroot/usr/lib/$ABI/libc++_static.a" \
   "$TC/sysroot/usr/lib/$ABI/libc++abi.a" \
+  "$CLANG_RT/libunwind.a" \
   -landroid -laaudio -llog -lc -lm -ldl
+
+# 链接完立刻查：所有 __aarch64_* 原子符号必须已被消解，
+# 否则这就是一个"装得上、跑不了"的包。
+UNDEF_ATOMIC="$("${RUN[@]}" "$TC/bin/llvm-readelf" --dyn-syms "$LIB/libflowengine.so" 2>/dev/null \
+  | grep " UND " | grep -o "__aarch64_[A-Za-z0-9_]*" || true)"
+if [ -n "$UNDEF_ATOMIC" ]; then
+  echo "链接失败：仍有未消解的原子符号（dlopen 会失败，应用起不来）："
+  echo "$UNDEF_ATOMIC"
+  exit 1
+fi
+echo "   原子符号全部消解"
 
 ls -la "$LIB/libflowengine.so"
 echo "[native] 完成"

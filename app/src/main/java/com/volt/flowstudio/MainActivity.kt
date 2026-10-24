@@ -10,6 +10,7 @@ import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.TextView
 import com.volt.flowstudio.model.Project
 import com.volt.flowstudio.session.StudioSession
 import com.volt.flowstudio.ui.*
@@ -33,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var mixer: MixerView
     private lateinit var auto: AutomationView
     private lateinit var keys: KeyboardView
+    private lateinit var banner: android.widget.TextView
 
     private var currentTab = 0    // 0=步进 1=钢琴卷帘 2=播放列表 3=混音台 4=自动化
 
@@ -51,6 +53,7 @@ class MainActivity : Activity() {
         buildUi()
         bindSession()
         showTab(0)
+        showBootDiagnostics()
         ui.post(ticker)
     }
 
@@ -76,6 +79,19 @@ class MainActivity : Activity() {
         root.addView(tabBar, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, dp(30)
         ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(44) })
+
+        // 诊断条：启动有问题时显示，正常时完全隐藏
+        banner = TextView(this).apply {
+            setBackgroundColor(0xFF7A1D18.toInt())
+            setTextColor(0xFFFFE4E0.toInt())
+            textSize = 11f
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            visibility = View.GONE
+            setOnClickListener { showDiagnostics() }
+        }
+        root.addView(banner, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(74) })
 
         content = FrameLayout(this)
         root.addView(content, FrameLayout.LayoutParams(
@@ -334,6 +350,52 @@ class MainActivity : Activity() {
                 toast("导出失败")
             }
         }
+    }
+
+    /** 启动阶段有问题就把原因顶在界面上，别让用户猜。 */
+    private fun showBootDiagnostics() {
+        val err = (application as FlowApp).bootError
+        if (err.isNullOrBlank()) return
+        banner.text = "⚠ $err  （点这里看详情）"
+        banner.visibility = View.VISIBLE
+        // 诊断条会盖住内容，把内容整体下移
+        (content.layoutParams as? FrameLayout.LayoutParams)?.let {
+            it.topMargin = dp(74) + dp(46)
+            content.layoutParams = it
+        }
+    }
+
+    /** 崩溃日志全文，支持复制或分享给开发者。 */
+    private fun showDiagnostics() {
+        val app = application as FlowApp
+        val log = buildString {
+            appendLine("== 启动状态 ==")
+            appendLine(app.bootError ?: "正常")
+            appendLine()
+            appendLine("== 原生库 ==")
+            appendLine(NativeLib.status)
+            appendLine()
+            appendLine("== 崩溃日志 ==")
+            appendLine(CrashGuard.fullLog(this@MainActivity))
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("诊断信息")
+            .setMessage(log)
+            .setPositiveButton("复制") { _, _ ->
+                val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("FlowStudio 诊断", log))
+                toast("已复制")
+            }
+            .setNeutralButton("分享") { _, _ ->
+                val i = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(android.content.Intent.EXTRA_TEXT, log)
+                }
+                startActivity(android.content.Intent.createChooser(i, "分享诊断信息"))
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun toast(msg: String) {

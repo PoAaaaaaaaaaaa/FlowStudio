@@ -100,20 +100,59 @@ class AudioService : Service() {
     }
 }
 
-/** 应用级单例，持有会话。Activity 重建时音频不中断。 */
+/**
+ * 应用级单例，持有会话。Activity 重建时音频不中断。
+ *
+ * onCreate 里的每一行都不能让异常逃出去：这里崩了，用户看到的就是"点图标就消失"，
+ * 连界面都进不去，也没法看一眼到底什么坏了。所以全部包起来，并把失败原因带到界面上。
+ */
 class FlowApp : android.app.Application() {
+
+    @Volatile
     lateinit var session: com.volt.flowstudio.session.StudioSession
+        private set
+
+    /** 启动阶段出了什么意外，主界面会把它显示出来。null 表示一切正常。 */
+    @Volatile
+    var bootError: String? = null
         private set
 
     override fun onCreate() {
         super.onCreate()
-        com.volt.flowstudio.audio.NativeEngine.loadLibrary()
-        session = com.volt.flowstudio.session.StudioSession(this)
-        session.boot()
+
+        // 第一件事就是装崩溃钩子，后面任何一行炸了都留得下现场
+        CrashGuard.install(this)
+
+        try {
+            val loaded = com.volt.flowstudio.audio.NativeEngine.loadLibrary(this)
+            if (!loaded) {
+                bootError = "音频引擎没能加载：${NativeLib.status}"
+                android.util.Log.e("FlowStudio", bootError!!)
+            }
+        } catch (t: Throwable) {
+            bootError = "音频引擎加载异常：${t.javaClass.simpleName}: ${t.message}"
+            android.util.Log.e("FlowStudio", bootError!!, t)
+        }
+
+        try {
+            session = com.volt.flowstudio.session.StudioSession(this)
+            session.boot()
+        } catch (t: Throwable) {
+            // 会话都建不起来也要能进界面：给一个不接引擎的空壳，至少让用户看到提示
+            bootError = (bootError?.plus("\n") ?: "") +
+                "工程会话初始化失败：${t.javaClass.simpleName}: ${t.message}"
+            android.util.Log.e("FlowStudio", "会话初始化失败", t)
+            session = com.volt.flowstudio.session.StudioSession(this)
+        }
+
+        // 上次如果是崩溃退出，把原因也带出来
+        CrashGuard.lastCrashSummary?.let {
+            bootError = (bootError?.plus("\n") ?: "") + "上次异常退出：$it"
+        }
     }
 
     override fun onTerminate() {
-        session.shutdown()
+        runCatching { session.shutdown() }
         super.onTerminate()
     }
 }

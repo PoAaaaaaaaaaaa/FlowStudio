@@ -12,8 +12,8 @@ android {
         applicationId = "com.volt.flowstudio"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "1.0.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -21,7 +21,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_static")
-                cppFlags += listOf("-O2", "-fvisibility=hidden")
+                cppFlags += listOf("-O2", "-fvisibility=hidden", "-mno-outline-atomics")
             }
         }
     }

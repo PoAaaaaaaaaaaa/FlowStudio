@@ -20,6 +20,8 @@ add_library(flowengine SHARED
     "${ENGINE_DIR}/src/effect.cpp"
     "${ENGINE_DIR}/src/engine.cpp"
     "${ENGINE_DIR}/src/audio_android.cpp"
+    "${ENGINE_DIR}/src/emutls_shim.cpp"
+    "${ENGINE_DIR}/src/atomic_shim.s"
     "${CMAKE_CURRENT_SOURCE_DIR}/jni_bridge.cpp"
 )
 
@@ -31,6 +33,10 @@ target_include_directories(flowengine PRIVATE
 target_compile_options(flowengine PRIVATE
     -O2
     -fvisibility=hidden
+    # 关掉 outline atomics：否则 armv8.0 上会生成对
+    # __aarch64_swp1_acq_rel 等符号的调用，NDK 没有它们的实现，
+    # 结果就是 so 装得上但 dlopen 失败。
+    -mno-outline-atomics
     -ffunction-sections
     -fdata-sections
     -Wall

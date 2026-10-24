@@ -28,6 +28,10 @@ class StudioSession(private val context: Context) {
 
     val engine = NativeEngine.instance
 
+    /** 与外部工具（DSH 插件）通信的本地服务 */
+    var bridge: StudioBridge? = null
+        private set
+
     private val io = Executors.newSingleThreadExecutor { r ->
         Thread(r, "flow-io").apply { priority = Thread.NORM_PRIORITY }
     }
@@ -41,19 +45,52 @@ class StudioSession(private val context: Context) {
 
     // ---------------------------------------------------------------- 生命周期
 
+    /**
+     * 启动会话。返回 false 表示音频引擎不可用，但界面依然可以打开：
+     * 编辑、存档、导出都照常，只是出不了声。
+     * 1.0.0 在这里直接崩掉了整个应用，这次不允许再发生。
+     */
     fun boot(): Boolean {
         if (!engine.create()) {
-            onError?.invoke("原生音频引擎加载失败，检查 libflowengine.so 是否打进了 APK")
+            onError?.invoke("音频引擎不可用，界面仍可使用（编辑与存档正常，播放无声）")
+            runCatching { reloadLastOrDefault() }
+            // 引擎坏了也让插件能连上，至少能读工程、生成新工程
+            runCatching { startBridge() }
             return false
         }
-        engine.prepare(48000, 256)
-        reloadLastOrDefault()
-        pushAll()
-        engine.setMaster(project.masterVolume / 100f, project.masterLimiter, project.masterSoftClip, project.masterGainDb)
-        return true
+        return try {
+            engine.prepare(48000, 256)
+            reloadLastOrDefault()
+            pushAll()
+            engine.setMaster(
+                project.masterVolume / 100f,
+                project.masterLimiter,
+                project.masterSoftClip,
+                project.masterGainDb
+            )
+            // 本地桥接：让 DSH 插件能看到并修改这个正在跑的工程
+            runCatching { startBridge() }
+            true
+        } catch (t: Throwable) {
+            android.util.Log.e("FlowStudio", "会话启动失败", t)
+            onError?.invoke("会话启动失败：${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
+    }
+
+    private fun startBridge() {
+        if (bridge?.running == true) return
+        val b = StudioBridge(context.applicationContext, this)
+        if (b.start()) {
+            bridge = b
+            android.util.Log.i("FlowStudio", "桥接端口 ${b.port}")
+        } else {
+            android.util.Log.w("FlowStudio", "桥接启动失败")
+        }
     }
 
     fun shutdown() {
+        runCatching { bridge?.stopServer() }
         stopPlayback()
         engine.stopAudio()
         engine.destroy()
@@ -219,6 +256,26 @@ class StudioSession(private val context: Context) {
             }
         }
     }
+
+    /** 外部（桥接/插件）整体替换工程。保持传输位置，避免听起来突然跳。 */
+    fun replaceProject(incoming: Project) {
+        val wasPlaying = isPlaying()
+        stopPlayback()
+        project = incoming
+        currentFile = null
+        pushAll()
+        runCatching { onLoaded?.invoke(project) }
+        if (wasPlaying) play()
+        scheduleAutoSave()
+    }
+
+    /** 供桥接服务显示在 /ping 里 */
+    fun versionName(): String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+    }.getOrDefault("?")
+
+    /** 桥接服务要读的上下文 */
+    fun appContext(): android.content.Context = context
 
     fun newProject(withDemo: Boolean) {
         stopPlayback()
