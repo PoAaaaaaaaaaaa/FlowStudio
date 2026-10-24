@@ -5,8 +5,8 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
-import com.volt.flowstudio.model.EffectType
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -40,8 +40,18 @@ class KnobView @JvmOverloads constructor(
 
     private var lastY = 0f
     private var lastX = 0f
+    var defaultValue: Float = 0.5f
     private var dragging = false
     private var fine = false
+    private var moved = false
+    private var lastTapAt = 0L
+    private val longPress = Runnable {
+        if (dragging && !moved) {
+            fine = true
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invalidate()
+        }
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = resolveSize(dp(52f).toInt(), widthMeasureSpec)
@@ -73,7 +83,11 @@ class KnobView @JvmOverloads constructor(
         canvas.drawArc(b.rect, startAngle, sweepTotal * value, false, b.stroke)
         b.stroke.strokeCap = Paint.Cap.BUTT
 
-        // 中心圆
+        // 中心圆与触摸态光圈；长按后明确显示精调状态。
+        if (dragging) {
+            b.fill.color = Palette.withAlpha(accent, if (fine) 48 else 24)
+            canvas.drawCircle(cx, cy, radius * 1.16f, b.fill)
+        }
         b.fill.color = Palette.PANEL_HI
         b.fill.style = Paint.Style.FILL
         canvas.drawCircle(cx, cy, radius * 0.66f, b.fill)
@@ -93,7 +107,8 @@ class KnobView @JvmOverloads constructor(
         )
 
         // 标签
-        label(canvas, label, cx, labelH, Palette.TEXT_DIM, sp(9.5f), center = true)
+        label(canvas, if (fine) "$label · 精调" else label, cx, labelH,
+            if (fine) accent else Palette.TEXT_DIM, sp(9.5f), center = true)
         displayValue?.let {
             label(canvas, it, cx, cy + radius + dp(1f) + sp(9f), Palette.TEXT, sp(9.5f), bold = true, center = true)
         }
@@ -106,25 +121,49 @@ class KnobView @JvmOverloads constructor(
                 lastX = e.x
                 dragging = true
                 fine = false
+                moved = false
                 parent?.requestDisallowInterceptTouchEvent(true)
-                if (e.pointerCount >= 2) fine = true
+                postDelayed(longPress, 420L)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 if (!dragging) return false
-                val sensitivity = if (fine) 0.0018f else 0.006f
                 val dy = lastY - e.y
                 val dx = e.x - lastX
+                if (kotlin.math.abs(dy) + kotlin.math.abs(dx) > dp(1f)) {
+                    moved = true
+                    removeCallbacks(longPress)
+                }
+                val sensitivity = if (fine) 0.0012f else 0.0045f
                 value = clamp01(value + (dy + dx) * sensitivity)
                 lastY = e.y
                 lastX = e.x
                 onValueChange?.invoke(value)
                 return true
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (e.pointerCount >= 2) {
+                    fine = true
+                    invalidate()
+                }
+                return true
+            }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(longPress)
                 if (dragging) {
+                    val now = e.eventTime
+                    if (!moved && e.actionMasked == MotionEvent.ACTION_UP && now - lastTapAt < 300L) {
+                        value = defaultValue
+                        onValueChange?.invoke(value)
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        lastTapAt = 0L
+                    } else if (!moved) {
+                        lastTapAt = now
+                    }
                     dragging = false
+                    fine = false
                     onValueCommitted?.invoke(value)
+                    invalidate()
                 }
                 return true
             }
@@ -223,3 +262,4 @@ class FaderView @JvmOverloads constructor(
         onValueChange?.invoke(value)
     }
 }
+

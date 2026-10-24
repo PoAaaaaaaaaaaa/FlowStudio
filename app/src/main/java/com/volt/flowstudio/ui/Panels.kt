@@ -5,7 +5,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import com.volt.flowstudio.model.Effect
 import com.volt.flowstudio.model.EffectType
@@ -29,8 +28,8 @@ class SoundPanel(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(Palette.PANEL)
-        setPadding(dp(10), dp(8), dp(10), dp(8))
+        background = panelBackground(context)
+        setPadding(dp(18), dp(16), dp(18), dp(14))
         instRow = LinearLayout(context)
         paramRow = LinearLayout(context)
         setup()
@@ -49,7 +48,7 @@ class SoundPanel(
         addView(TextView(context).apply {
             text = "${t0.name} · 音色"
             setTextColor(Palette.TEXT)
-            textSize = 15f
+            textSize = 18f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, dp(6))
         })
@@ -67,8 +66,8 @@ class SoundPanel(
         Instrument.values().forEach { inst ->
             val btn = TextView(context).apply {
                 text = inst.cn
-                textSize = 11f
-                setPadding(dp(10), dp(6), dp(10), dp(6))
+                textSize = 12f
+                setPadding(dp(12), dp(9), dp(12), dp(9))
                 setOnClickListener {
                     val t = session.project.trackAt(trackIndex) ?: return@setOnClickListener
                     t.instrument = inst
@@ -114,7 +113,11 @@ class SoundPanel(
             setPadding(0, dp(8), 0, dp(8))
         }
         addView(
-            ScrollView(context).apply { addView(paramRow) },
+            HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+                isFillViewport = true
+                addView(paramRow)
+            },
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
@@ -137,6 +140,13 @@ class SoundPanel(
         )
 
         rebuildKnobs()
+        addView(TextView(context).apply {
+            text = "旋钮上下拖动调值 · 长按精调 · 双击复位"
+            setTextColor(Palette.TEXT_FAINT)
+            textSize = 10f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, 0)
+        })
     }
 
     private fun paintInstrumentButtons(selected: Instrument) {
@@ -144,8 +154,7 @@ class SoundPanel(
             val v = instRow.getChildAt(i) as? TextView ?: continue
             val inst = Instrument.values().getOrNull(i) ?: continue
             val on = inst == selected
-            v.setTextColor(if (on) Palette.BG else Palette.TEXT_DIM)
-            v.setBackgroundColor(if (on) Palette.ACCENT else Palette.PANEL_HI)
+            styleChoiceButton(v, on)
         }
     }
 
@@ -230,8 +239,7 @@ class SoundPanel(
                 text = preset.name
                 textSize = 10.5f
                 setPadding(dp(9), dp(6), dp(9), dp(6))
-                setTextColor(Palette.TEXT)
-                setBackgroundColor(Palette.PANEL_HI)
+                styleChoiceButton(this, false)
                 setOnClickListener {
                     val t = session.project.trackAt(trackIndex) ?: return@setOnClickListener
                     com.volt.flowstudio.model.Presets.apply(preset, t)
@@ -290,12 +298,12 @@ class FxPanel(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(Palette.PANEL)
-        setPadding(dp(10), dp(8), dp(10), dp(8))
+        background = panelBackground(context)
+        setPadding(dp(18), dp(16), dp(18), dp(14))
 
         titleView = TextView(context).apply {
             setTextColor(Palette.TEXT)
-            textSize = 14f
+            textSize = 18f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, dp(6))
         }
@@ -315,7 +323,11 @@ class FxPanel(
             setPadding(0, dp(10), 0, dp(4))
         }
         addView(
-            ScrollView(context).apply { addView(knobRow) },
+            HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+                isFillViewport = true
+                addView(knobRow)
+            },
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
@@ -339,8 +351,7 @@ class FxPanel(
                 text = et.cn
                 textSize = 11f
                 setPadding(dp(9), dp(6), dp(9), dp(6))
-                setTextColor(if (on) Palette.BG else Palette.TEXT_DIM)
-                setBackgroundColor(if (on) Palette.ACCENT else Palette.PANEL_HI)
+                styleChoiceButton(this, on)
                 setOnClickListener {
                     val t = session.project.trackAt(trackIndex) ?: return@setOnClickListener
                     val cur = t.effects.getOrNull(slot) ?: return@setOnClickListener
@@ -406,8 +417,7 @@ class FxPanel(
                 textSize = 11f
                 gravity = Gravity.CENTER
                 setPadding(dp(8), dp(8), dp(8), dp(8))
-                setTextColor(if (fx.enabled) Palette.BG else Palette.TEXT_DIM)
-                setBackgroundColor(if (fx.enabled) Palette.GREEN else Palette.PANEL_HI)
+                styleChoiceButton(this, fx.enabled, Palette.GREEN)
                 setOnClickListener {
                     val t = session.project.trackAt(trackIndex) ?: return@setOnClickListener
                     val e = t.effects.getOrNull(slot) ?: return@setOnClickListener
@@ -444,3 +454,4 @@ class FxPanel(
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
+

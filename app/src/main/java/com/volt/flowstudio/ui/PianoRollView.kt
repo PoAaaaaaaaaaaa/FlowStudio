@@ -530,3 +530,4 @@ class PianoRollView @JvmOverloads constructor(
         invalidate()
     }
 }
+

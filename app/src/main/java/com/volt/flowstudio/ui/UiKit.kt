@@ -12,27 +12,28 @@ import android.view.View
 import kotlin.math.max
 import kotlin.math.min
 
-/** 界面配色。深色 + 橙色主调，跟启动图标一致。 */
+/** 统一视觉系统：低亮石墨底、暖琥珀主色、青色仅用于时间与状态。 */
 object Palette {
-    const val BG = 0xFF0D0E12.toInt()
-    const val PANEL = 0xFF16181F.toInt()
-    const val PANEL_HI = 0xFF1E212A.toInt()
-    const val LINE = 0xFF2A2E3A.toInt()
-    const val LINE_SOFT = 0xFF202430.toInt()
-    const val ACCENT = 0xFFFF8A1F.toInt()
-    const val ACCENT_DIM = 0xFF7A4310.toInt()
-    const val CYAN = 0xFF35D0E0.toInt()
-    const val GREEN = 0xFF4ADE80.toInt()
-    const val RED = 0xFFF0453F.toInt()
-    const val YELLOW = 0xFFFDE047.toInt()
-    const val PURPLE = 0xFFA78BFA.toInt()
-    const val TEXT = 0xFFE8EAF0.toInt()
-    const val TEXT_DIM = 0xFF8B90A0.toInt()
-    const val TEXT_FAINT = 0xFF575D6E.toInt()
+    const val BG = 0xFF0B0D12.toInt()
+    const val SURFACE = 0xFF10141C.toInt()
+    const val PANEL = 0xFF151A23.toInt()
+    const val PANEL_HI = 0xFF202633.toInt()
+    const val LINE = 0xFF303746.toInt()
+    const val LINE_SOFT = 0xFF222936.toInt()
+    const val ACCENT = 0xFFFFAD42.toInt()
+    const val ACCENT_DIM = 0xFF84501F.toInt()
+    const val CYAN = 0xFF54D6E8.toInt()
+    const val GREEN = 0xFF52D99A.toInt()
+    const val RED = 0xFFFF6B6B.toInt()
+    const val YELLOW = 0xFFF9D65C.toInt()
+    const val PURPLE = 0xFFB69CFF.toInt()
+    const val TEXT = 0xFFF3F5FA.toInt()
+    const val TEXT_DIM = 0xFFABB4C4.toInt()
+    const val TEXT_FAINT = 0xFF788398.toInt()
 
     // 每条轨道分配一个可辨识的颜色，混音台和播放列表都用它
     private val TRACK_COLORS = intArrayOf(
-        0xFFFF8A1F.toInt(), 0xFF35D0E0.toInt(), 0xFFA78BFA.toInt(), 0xFF4ADE80.toInt(),
+        0xFFFFAD42.toInt(), 0xFF54D6E8.toInt(), 0xFFB69CFF.toInt(), 0xFF52D99A.toInt(),
         0xFFFDE047.toInt(), 0xFFF0453F.toInt(), 0xFF22D3EE.toInt(), 0xFFFB7185.toInt(),
         0xFF818CF8.toInt(), 0xFF34D399.toInt(), 0xFFFBBF24.toInt(), 0xFFE879F9.toInt()
     )
@@ -140,3 +141,4 @@ fun MotionEvent.deltaNorm(prevX: Float, prevY: Float, span: Float): Float {
 }
 
 fun clamp01(v: Float): Float = max(0f, min(1f, v))
+

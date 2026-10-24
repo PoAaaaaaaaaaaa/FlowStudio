@@ -45,6 +45,9 @@ class MixerView @JvmOverloads constructor(
     private var dragTrack = -1
     private var dragStartY = 0f
     private var dragStartValue = 0f
+    private var scrollStartX = 0f
+    private var scrollStart = 0f
+    private var draggingScroll = false
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
@@ -74,7 +77,7 @@ class MixerView @JvmOverloads constructor(
             val isSel = i == selectedTrack
 
             // 通道条底
-            rect(canvas, x0 + dp(1f), 0f, x1 - dp(1f), h - dp(2f), Palette.PANEL, dp(3f))
+            rect(canvas, x0 + dp(2f), dp(2f), x1 - dp(2f), h - dp(4f), Palette.PANEL, dp(8f))
             if (isSel) {
                 outline(canvas, x0 + dp(1f), 0f, x1 - dp(1f), h - dp(2f), color, dp(3f), dp(1.5f))
             }
@@ -171,7 +174,7 @@ class MixerView @JvmOverloads constructor(
 
         // ---- 母带条 ----
         val mx0 = w - masterW
-        rect(canvas, mx0, 0f, w, h, 0xFF12141B.toInt())
+        rect(canvas, mx0, 0f, w, h, Palette.SURFACE)
         line(canvas, mx0, 0f, mx0, h, Palette.LINE, dp(1f))
         rect(canvas, mx0, 0f, w, dp(3f), Palette.ACCENT)
         label(canvas, "母带", mx0 + masterW / 2, dp(16f), Palette.ACCENT, sp(9.5f), bold = true, center = true)
@@ -231,6 +234,9 @@ class MixerView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 dragStartY = e.y
+                scrollStartX = e.x
+                scrollStart = scrollX
+                draggingScroll = false
 
                 // 母带区
                 if (e.x >= w - masterW) {
@@ -305,6 +311,13 @@ class MixerView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_MOVE -> {
+                if (drag == Drag.NONE && kotlin.math.abs(e.x - scrollStartX) > dp(8f)) draggingScroll = true
+                if (draggingScroll) {
+                    val maxScroll = max(0f, p.tracks.size * stripW - (w - masterW))
+                    scrollX = (scrollStart - (e.x - scrollStartX)).coerceIn(0f, maxScroll)
+                    invalidate()
+                    return true
+                }
                 when (drag) {
                     Drag.FADER -> {
                         val t = p.trackAt(dragTrack) ?: return true
@@ -335,6 +348,7 @@ class MixerView @JvmOverloads constructor(
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 drag = Drag.NONE
+                draggingScroll = false
                 invalidate()
                 return true
             }
@@ -342,3 +356,4 @@ class MixerView @JvmOverloads constructor(
         return true
     }
 }
+

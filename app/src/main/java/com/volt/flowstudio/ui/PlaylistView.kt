@@ -57,6 +57,9 @@ class PlaylistView @JvmOverloads constructor(
     private var origTrack = 0
     private var lastClipTapTime = 0L
     private var lastClipTapped: Clip? = null
+    private var panX = 0f
+    private var panY = 0f
+    private var loopAnchor = 0
 
     private fun barWidth(): Float {
         if (pixelsPerBar > 0f) return pixelsPerBar
@@ -76,7 +79,7 @@ class PlaylistView @JvmOverloads constructor(
 
         val p = project ?: return
         headerWidth = dp(64f)
-        rulerHeight = dp(20f)
+        rulerHeight = dp(26f)
         val tracks = p.tracks.size.coerceAtLeast(1)
         rowHeight = ((h - rulerHeight) / min(tracks, 8).coerceAtLeast(1)).coerceAtLeast(dp(26f))
 
@@ -156,8 +159,8 @@ class PlaylistView @JvmOverloads constructor(
             val bt = top + rowHeight - dp(2f)
 
             // 片段本体：用 pattern 里的音符画一层迷你条，一眼看出内容
-            rect(canvas, l, t, r, bt, Palette.withAlpha(color, 55), dp(3f))
-            outline(canvas, l, t, r, bt, Palette.withAlpha(color, 190), dp(3f), dp(1.2f))
+            rect(canvas, l, t, r, bt, Palette.withAlpha(color, 62), dp(6f))
+            outline(canvas, l, t, r, bt, Palette.withAlpha(color, 200), dp(6f), dp(1.2f))
 
             // 片段内容：画成波形包络，而不是几条横线。
             // FL 的片段一眼能看出"这段是密的还是疏的"，靠的就是这个。
@@ -200,10 +203,13 @@ class PlaylistView @JvmOverloads constructor(
                 parent?.requestDisallowInterceptTouchEvent(true)
                 dragStartX = e.x
                 dragStartY = e.y
+                panX = e.x
+                panY = e.y
 
                 // 标尺：划循环 / 定位
                 if (e.y < rulerHeight) {
                     val tick = xToTick(e.x).coerceAtLeast(0)
+                    loopAnchor = tick
                     val nearStart = kotlin.math.abs(tickToX(loopStart) - e.x) < dp(14f)
                     val nearEnd = kotlin.math.abs(tickToX(loopEnd) - e.x) < dp(14f)
                     if (loopOn && (nearStart || nearEnd)) {
@@ -253,12 +259,31 @@ class PlaylistView @JvmOverloads constructor(
                 return true
             }
 
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                drag = Drag.PAN
+                activeClip = null
+                panX = (e.getX(0) + e.getX(1)) / 2f
+                panY = (e.getY(0) + e.getY(1)) / 2f
+                return true
+            }
             MotionEvent.ACTION_MOVE -> {
+                if (drag == Drag.SEEK && kotlin.math.abs(e.x - dragStartX) > dp(12f)) drag = Drag.PAN
                 when (drag) {
-                    Drag.SEEK -> onSeek?.invoke(xToTick(e.x).coerceAtLeast(0))
+                    Drag.PAN -> {
+                        val mx = if (e.pointerCount >= 2) (e.getX(0) + e.getX(1)) / 2f else e.x
+                        val my = if (e.pointerCount >= 2) (e.getY(0) + e.getY(1)) / 2f else e.y
+                        scrollX = (scrollX - (mx - panX)).coerceAtLeast(0f)
+                        val contentH = p.tracks.size.coerceAtLeast(1) * rowHeight
+                        scrollY = (scrollY - (my - panY)).coerceIn(0f, max(0f, contentH - height + rulerHeight))
+                        panX = mx
+                        panY = my
+                        invalidate()
+                    }
+                    Drag.SEEK -> Unit
                     Drag.LOOP -> {
                         val tick = xToTick(e.x).coerceAtLeast(0)
-                        if (tick < loopStart) { loopStart = tick } else { loopEnd = tick }
+                        loopStart = min(loopAnchor, tick)
+                        loopEnd = max(loopAnchor, tick)
                         invalidate()
                     }
                     Drag.MOVE -> {
@@ -389,3 +414,4 @@ class PlaylistView @JvmOverloads constructor(
         }
     }
 }
+

@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.util.AttributeSet
+import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import com.volt.flowstudio.model.Instrument
 import com.volt.flowstudio.model.Note
@@ -50,10 +52,22 @@ class ChannelRackView @JvmOverloads constructor(
     var onPreview: ((Int) -> Unit)? = null
     var onAddTrack: (() -> Unit)? = null
     var onRemoveTrack: ((Int) -> Unit)? = null
+    var onTrackActions: ((Int) -> Unit)? = null
+
+    private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean = true
+        override fun onLongPress(e: MotionEvent) {
+            val index = ((e.y - headerH) / rowHeight).toInt()
+            if (e.x < colMute && index in (project?.tracks?.indices ?: IntRange.EMPTY)) {
+                onTrackActions?.invoke(index)
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            }
+        }
+    })
 
     private var rowHeight = 0f
     private var headerH = 0f   // 顶部操作栏
-    private val addBtnH get() = dp(30f)
+    private val addBtnH get() = dp(40f)
 
     // 每行内部的列位置
     private var colName = 0f
@@ -75,15 +89,16 @@ class ChannelRackView @JvmOverloads constructor(
         canvas.drawColor(Palette.BG)
 
         val p = project ?: return
-        headerH = dp(26f)
+        headerH = dp(32f)
 
         // 列布局：屏宽的分配比例
         colName = w * 0.00f
-        val nameW = max(dp(112f), w * 0.26f)
+        val portrait = w < dp(600f)
+        val nameW = if (portrait) max(dp(100f), w * 0.24f) else max(dp(126f), w * 0.21f)
         colMute = nameW
-        colSolo = colMute + dp(26f)
-        colVol = colSolo + dp(26f)
-        colSteps = colVol + dp(64f)
+        colSolo = colMute + dp(if (portrait) 32f else 36f)
+        colVol = colSolo + dp(if (portrait) 32f else 36f)
+        colSteps = colVol + dp(if (portrait) 70f else 76f)
         val stepsW = (w - colSteps).coerceAtLeast(dp(80f))
 
         val rows = p.tracks.size
@@ -97,15 +112,17 @@ class ChannelRackView @JvmOverloads constructor(
         rowHeight = (availH / rows.coerceAtMost(8)).coerceIn(dp(38f), dp(64f))
 
         // ---- 顶部：样式选择 + 摇摆 ----
-        rect(canvas, 0f, 0f, w, headerH, Palette.PANEL)
+        rect(canvas, 0f, 0f, w, headerH, Palette.SURFACE)
+        rect(canvas, 0f, headerH - dp(1f), w, headerH, Palette.LINE_SOFT)
         val pat = p.patternAt(currentPatternIndex)
         label(
             canvas, "样式 ${pat?.name ?: "-"}  ·  ${pat?.bars ?: 0} 小节",
-            dp(8f), headerH - dp(8f), Palette.ACCENT, sp(10f), bold = true
+            dp(10f), dp(14f), Palette.ACCENT, sp(10.5f), bold = true
         )
+        labelRight(canvas, "点通道名调音色 · 长按管理", w - dp(10f), dp(14f), Palette.TEXT_FAINT, sp(8.5f))
         if (p.swing > 0.001f) {
-            labelRight(canvas, "摇摆 ${(p.swing * 100).toInt()}%", w - dp(8f), headerH - dp(8f),
-                Palette.CYAN, sp(9f), bold = true)
+            label(canvas, "SWING ${(p.swing * 100).toInt()}%", dp(10f), headerH - dp(5f),
+                Palette.CYAN, sp(7.5f), bold = true)
         }
 
         // ---- 每行 ----
@@ -120,10 +137,10 @@ class ChannelRackView @JvmOverloads constructor(
             val color = Palette.trackColor(i)
             val isSel = i == selectedTrack
 
-            // 行底
-            rect(canvas, 0f, top, w, bottom,
+            // 每行是一张独立通道卡；留白让选择态和触摸边界更明确。
+            rect(canvas, dp(2f), top + dp(2f), w - dp(2f), bottom - dp(2f),
                 if (isSel) Palette.withAlpha(color, 30) else
-                    if (i % 2 == 0) Palette.withAlpha(Palette.PANEL, 120) else Palette.BG)
+                    if (i % 2 == 0) Palette.PANEL else Palette.SURFACE, dp(7f))
             if (isSel) {
                 rect(canvas, 0f, top, dp(3f), bottom, color)
             }
@@ -145,16 +162,16 @@ class ChannelRackView @JvmOverloads constructor(
             }
 
             // ---- 静音 ----
-            val btnTop = top + rowHeight / 2 - dp(8f)
-            rect(canvas, colMute + dp(2f), btnTop, colMute + dp(22f), btnTop + dp(16f),
-                if (t.mute) Palette.RED else Palette.PANEL_HI, dp(2.5f))
-            label(canvas, "M", colMute + dp(12f), btnTop + dp(11.5f),
+            val btnTop = top + rowHeight / 2 - dp(11f)
+            rect(canvas, colMute + dp(2f), btnTop, colMute + dp(26f), btnTop + dp(22f),
+                if (t.mute) Palette.RED else Palette.PANEL_HI, dp(6f))
+            label(canvas, "M", colMute + dp(14f), btnTop + dp(15f),
                 if (t.mute) Palette.BG else Palette.TEXT_DIM, sp(9f), bold = true, center = true)
 
             // ---- 独奏 ----
-            rect(canvas, colSolo + dp(2f), btnTop, colSolo + dp(22f), btnTop + dp(16f),
-                if (t.solo) Palette.YELLOW else Palette.PANEL_HI, dp(2.5f))
-            label(canvas, "S", colSolo + dp(12f), btnTop + dp(11.5f),
+            rect(canvas, colSolo + dp(2f), btnTop, colSolo + dp(26f), btnTop + dp(22f),
+                if (t.solo) Palette.YELLOW else Palette.PANEL_HI, dp(6f))
+            label(canvas, "S", colSolo + dp(14f), btnTop + dp(15f),
                 if (t.solo) Palette.BG else Palette.TEXT_DIM, sp(9f), bold = true, center = true)
 
             // ---- 音量条 ----
@@ -213,12 +230,13 @@ class ChannelRackView @JvmOverloads constructor(
         rect(canvas, 0f, top, w, h, Palette.PANEL)
         line(canvas, 0f, top, w, top, Palette.LINE, dp(1f))
         val cx = w / 2
-        rect(canvas, cx - dp(60f), top + dp(6f), cx + dp(60f), h - dp(6f),
-            Palette.withAlpha(Palette.ACCENT, 180), dp(4f))
+        rect(canvas, cx - dp(76f), top + dp(4f), cx + dp(76f), h - dp(4f),
+            Palette.ACCENT, dp(8f))
         label(canvas, "+ 添加通道", cx, top + dp(21f), Palette.BG, sp(10.5f), bold = true, center = true)
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        gestures.onTouchEvent(e)
         val p = project ?: return false
         val w = width.toFloat()
         val h = height.toFloat()
@@ -319,3 +337,4 @@ class ChannelRackView @JvmOverloads constructor(
         invalidate()
     }
 }
+

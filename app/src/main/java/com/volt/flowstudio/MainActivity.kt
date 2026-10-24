@@ -37,7 +37,9 @@ class MainActivity : Activity() {
     private lateinit var rack: ChannelRackView
     private lateinit var banner: android.widget.TextView
 
-    private var currentTab = 0    // 0=步进 1=钢琴卷帘 2=播放列表 3=混音台 4=自动化
+    private var currentTab = 0    // 机架 / 步进 / 卷帘 / 编排 / 混音 / 自动化
+    private var chromeTop = 0
+    private var chromeBottom = 0
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -58,6 +60,12 @@ class MainActivity : Activity() {
         ui.post(ticker)
     }
 
+    override fun onPause() {
+        // 来电、切后台或锁屏都先落盘，避免只等 onDestroy 时丢编辑。
+        session.saveNow(sync = false)
+        super.onPause()
+    }
+
     override fun onDestroy() {
         ui.removeCallbacks(ticker)
         session.saveNow(sync = true)
@@ -68,6 +76,10 @@ class MainActivity : Activity() {
 
     private fun buildUi() {
         val root = FrameLayout(this).apply { setBackgroundColor(Palette.BG) }
+        val portrait = resources.displayMetrics.widthPixels < dp(600)
+        chromeTop = dp(if (portrait) 120 else 116)
+        chromeBottom = dp(32)
+        root.addView(StudioBackground(this), matchParams())
 
         transportBar = TransportBar(this)
         root.addView(transportBar, FrameLayout.LayoutParams(
@@ -75,7 +87,7 @@ class MainActivity : Activity() {
         ).apply { gravity = android.view.Gravity.TOP })
 
         tabBar = TabBar(this).apply {
-            tabs = listOf("机架", "卷帘", "播放列表", "混音台", "自动化", "钢琴")
+            tabs = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
         }
         root.addView(tabBar, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, dp(30)
@@ -92,51 +104,132 @@ class MainActivity : Activity() {
         }
         root.addView(banner, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(74) })
+        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(76) })
 
         content = FrameLayout(this)
         root.addView(content, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = dp(74) })
+        ).apply {
+            topMargin = chromeTop
+            bottomMargin = chromeBottom
+        })
 
         // 0. 通道机架（FL 的骨架界面）
         rack = ChannelRackView(this)
         content.addView(rack, matchParams())
 
-        // 步进器（保留，作为机架的放大版）
+        // 1. 步进器：保留独立的大网格编辑页。
+        val stepsHolder = FrameLayout(this)
         steps = StepSequencerView(this)
-        content.addView(steps, matchParams())
+        addToolbar(stepsHolder, "步进音序器", "点按或横向刷过格子")
+        stepsHolder.addView(steps, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { topMargin = dp(42) })
+        content.addView(stepsHolder, matchParams())
 
-        // 钢琴卷帘 + 键盘
+        // 2. 钢琴卷帘 + 键盘 + 明确的编辑工具入口。
         val pianoHolder = FrameLayout(this)
         piano = PianoRollView(this)
         keys = KeyboardView(this).apply { noteCount = 24 }
+        addToolbar(pianoHolder, "钢琴卷帘", "双指缩放 · 拖右缘改时长")
         pianoHolder.addView(piano, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { bottomMargin = dp(92) })
+        ).apply { topMargin = dp(42); bottomMargin = dp(92) })
         pianoHolder.addView(keys, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, dp(92)
         ).apply { gravity = android.view.Gravity.BOTTOM })
         content.addView(pianoHolder, matchParams())
 
-        // 播放列表
+        // 3. 播放列表。
+        val playlistHolder = FrameLayout(this)
         playlist = PlaylistView(this)
-        content.addView(playlist, matchParams())
+        addToolbar(playlistHolder, "编排时间线", "拖动片段 · 双指平移 · 标尺划循环")
+        playlistHolder.addView(playlist, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { topMargin = dp(42) })
+        content.addView(playlistHolder, matchParams())
 
-        // 混音台
+        // 4. 混音台。
+        val mixerHolder = FrameLayout(this)
         mixer = MixerView(this)
-        content.addView(mixer, matchParams())
+        addToolbar(mixerHolder, "混音台", "点通道名调音色 · 点 FX 槽调效果")
+        mixerHolder.addView(mixer, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { topMargin = dp(42) })
+        content.addView(mixerHolder, matchParams())
 
-        // 自动化
+        // 5. 自动化。
+        val autoHolder = FrameLayout(this)
         auto = AutomationView(this)
-        content.addView(auto, matchParams())
+        addToolbar(autoHolder, "自动化", "绘制参数随时间变化的曲线")
+        autoHolder.addView(auto, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { topMargin = dp(42) })
+        content.addView(autoHolder, matchParams())
 
+        FlowButton(this).apply {
+            text = "手势与操作指南  ·  FlowStudio 1.13"
+            textSize = 9.5f
+            minHeight = chromeBottom
+            minimumHeight = chromeBottom
+            setPadding(dp(12), 0, dp(12), 0)
+            buttonColor = Palette.SURFACE
+            foregroundColor = Palette.TEXT_FAINT
+            setOnClickListener { showGestureGuide() }
+            root.addView(this, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, chromeBottom
+            ).apply { gravity = android.view.Gravity.BOTTOM })
+        }
         setContentView(root)
     }
 
     private fun matchParams() = FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
     )
+
+    private fun addToolbar(holder: FrameLayout, title: String, subtitle: String): EditorToolbar {
+        val toolbar = EditorToolbar(this).apply {
+            this.title = title
+            this.subtitle = subtitle
+            onSwipePage = { direction -> showTab((currentTab + direction).coerceIn(0, 5)) }
+        }
+        holder.addView(toolbar, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, dp(42)
+        ))
+        return toolbar
+    }
+
+    private fun configurePianoTools(toolbar: EditorToolbar) {
+        toolbar.actions = listOf(
+            "吸附 ${if (piano.snap == com.volt.flowstudio.model.Note.STEP) "1/16" else "1/8"}" to {
+                piano.snap = if (piano.snap == com.volt.flowstudio.model.Note.STEP)
+                    com.volt.flowstudio.model.Note.STEP * 2 else com.volt.flowstudio.model.Note.STEP
+                configurePianoTools(toolbar)
+            },
+            "量化" to {
+                piano.quantizeSelected()
+                toast("已量化${if (piano.selected.isEmpty()) "全部" else "选中"}音符")
+            },
+            "删除" to {
+                val count = piano.deleteSelected()
+                toast(if (count > 0) "已删除 $count 个音符" else "请先点选要删除的音符")
+            },
+            "−" to { piano.zoom = piano.zoom / 1.35f },
+            "＋" to { piano.zoom = piano.zoom * 1.35f }
+        )
+    }
+
+    private fun configurePlaylistTools(toolbar: EditorToolbar) {
+        toolbar.actions = listOf(
+            "循环 ${if (session.project.loopOn) "开" else "关"}" to {
+                transportBar.onLoopToggle?.invoke()
+                configurePlaylistTools(toolbar)
+            },
+            "定位" to { session.seek(0); refreshPlayhead(); toast("已回到开头") },
+            "缩小" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(42).toFloat() else (playlist.pixelsPerBar / 1.35f).coerceAtLeast(dp(28).toFloat()); playlist.invalidate() },
+            "放大" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(120).toFloat() else (playlist.pixelsPerBar * 1.35f).coerceAtMost(dp(360).toFloat()); playlist.invalidate() }
+        )
+    }
 
     private fun bindSession() {
         transportBar.onPlay = play@{
@@ -169,11 +262,18 @@ class MainActivity : Activity() {
             playlist.invalidate()
             transportBar.setLoop(p.loopOn)
         }
-        transportBar.onMetronomeToggle = { on -> session.setMetronome(on) }
-        transportBar.onSave = { session.save(null) }
+        transportBar.onMetronomeToggle = { on ->
+            session.setMetronome(on)
+            transportBar.setMetronome(on)
+        }
+        transportBar.onSave = {
+            session.save(null) { ok -> toast(if (ok) "工程已保存" else "保存失败，请检查存储空间") }
+        }
         transportBar.onExport = { showExportDialog() }
         transportBar.onProject = { showProjectDialog() }
         transportBar.onSwing = { showSwingDialog() }
+        transportBar.onBpmTap = { showBpmDialog() }
+        transportBar.onMore = { showMoreDialog() }
 
         tabBar.onTabSelected = { showTab(it) }
 
@@ -231,6 +331,7 @@ class MainActivity : Activity() {
         }
         rack.onAddTrack = { showAddTrackDialog() }
         rack.onRemoveTrack = { idx -> removeTrack(idx) }
+        rack.onTrackActions = { idx -> showTrackActions(idx) }
 
         // ---- 步进器 ----
         steps.onToggleStep = step@{ track, tick ->
@@ -299,7 +400,8 @@ class MainActivity : Activity() {
         auto.onChanged = { session.pushAutomation(); session.scheduleAutoSave() }
 
         session.onError = { msg -> toast(msg) }
-        session.onSaved = { ok -> toast(if (ok) "已保存" else "保存失败") }
+        // 自动保存保持安静，只有手动保存显示结果。
+        session.onSaved = { ok -> if (!ok) toast("自动保存失败，请立即手动保存") }
         session.onLoaded = { p -> refreshAll(p) }
     }
 
@@ -330,11 +432,21 @@ class MainActivity : Activity() {
     }
 
     private fun showTab(index: Int) {
-        currentTab = index
-        // 页签顺序变了，确保索引不越界
         if (index !in 0 until content.childCount) return
+        currentTab = index
         for (i in 0 until content.childCount) {
-            content.getChildAt(i).visibility = if (i == index) View.VISIBLE else View.GONE
+            val page = content.getChildAt(i)
+            page.animate().cancel()
+            page.visibility = if (i == index) View.VISIBLE else View.GONE
+            page.alpha = 1f
+            page.translationX = 0f
+        }
+        content.getChildAt(index).animate().alpha(0.65f).alpha(1f).setDuration(130L).start()
+        ((content.getChildAt(index) as? FrameLayout)?.getChildAt(0) as? EditorToolbar)?.let { toolbar ->
+            when (index) {
+                2 -> configurePianoTools(toolbar)
+                3 -> configurePlaylistTools(toolbar)
+            }
         }
         tabBar.selected = index
         tabBar.invalidate()
@@ -390,26 +502,92 @@ class MainActivity : Activity() {
     private fun openSoundPanel(trackIndex: Int) {
         val track = session.project.trackAt(trackIndex) ?: return
         val panel = SoundPanel(this, session, trackIndex) { session.pushTrack(trackIndex); session.scheduleAutoSave() }
-        val dialog = android.app.Dialog(this, android.R.style.Theme_Material_NoActionBar)
-        dialog.setContentView(panel)
-        dialog.setCanceledOnTouchOutside(true)
-        dialog.show()
-        dialog.window?.setLayout(
-            (resources.displayMetrics.widthPixels * 0.72).toInt(),
-            (resources.displayMetrics.heightPixels * 0.82).toInt()
-        )
+        showStudioDialog(panel, 0.84f, 0.86f)
     }
 
     private fun openFxPanel(trackIndex: Int, slot: Int) {
         val panel = FxPanel(this, session, trackIndex, slot) { session.pushTrack(trackIndex); session.scheduleAutoSave() }
-        val dialog = android.app.Dialog(this, android.R.style.Theme_Material_NoActionBar)
+        showStudioDialog(panel, 0.76f, 0.76f)
+    }
+
+    private fun showStudioDialog(panel: View, widthRatio: Float, heightRatio: Float) {
+        val dialog = android.app.Dialog(this)
         dialog.setContentView(panel)
         dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialog.show()
         dialog.window?.setLayout(
-            (resources.displayMetrics.widthPixels * 0.60).toInt(),
-            (resources.displayMetrics.heightPixels * 0.62).toInt()
+            (resources.displayMetrics.widthPixels * widthRatio).toInt().coerceAtMost(dp(900)),
+            (resources.displayMetrics.heightPixels * heightRatio).toInt()
         )
+        dialog.window?.setGravity(android.view.Gravity.CENTER)
+        dialog.window?.attributes = dialog.window?.attributes?.apply {
+            dimAmount = 0.62f
+            windowAnimations = android.R.style.Animation_Dialog
+        }
+    }
+
+    private fun showBpmDialog() {
+        val input = android.widget.EditText(this).apply {
+            setText(String.format("%.1f", session.project.bpm))
+            setSelectAllOnFocus(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setTextColor(Palette.TEXT)
+            setHintTextColor(Palette.TEXT_FAINT)
+            background = panelBackground(this@MainActivity, 10f)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            hint = "40.0 – 260.0"
+        }
+        val wrap = android.widget.FrameLayout(this).apply { setPadding(dp(24), dp(12), dp(24), 0) }
+        wrap.addView(input)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("精确 BPM")
+            .setMessage("输入 40 到 260；也可在走带条上下拖动。")
+            .setView(wrap)
+            .setPositiveButton("应用") { _, _ ->
+                val value = input.text.toString().toFloatOrNull()
+                if (value == null || value !in 40f..260f) {
+                    toast("BPM 必须在 40 到 260 之间")
+                } else {
+                    transportBar.bpm = Math.round(value * 10f) / 10f
+                    transportBar.onBpmChange?.invoke(transportBar.bpm)
+                    toast("速度 ${transportBar.bpm} BPM")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showMoreDialog() {
+        val items = arrayOf("保存工程", "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}", "摇摆 / Swing", "操作指南")
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("更多控制")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> transportBar.onSave?.invoke()
+                    1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
+                    2 -> showSwingDialog()
+                    3 -> showGestureGuide()
+                }
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun showGestureGuide() {
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("手势与操作")
+            .setMessage(
+                "页签：点按切换，也可左右滑动。\n\n" +
+                "机架：点格子写音，横向刷格子；点通道名调音色；长按通道名管理或删除。\n\n" +
+                "卷帘：点空白画音，拖动音符移动，拖右缘改长度；双指缩放和平移。上方提供量化、删除和缩放。\n\n" +
+                "编排：拖片段移动或跨轨，拖右缘改长度；在标尺上横向划出循环。\n\n" +
+                "旋钮：上下或左右拖动，长按进入精调，双击复位，双指拖动也可精调。\n\n" +
+                "速度：上下拖动 BPM，轻点数字精确输入。\n\n" +
+                "工程在编辑后自动保存，切到后台也会保存。"
+            )
+            .setPositiveButton("开始创作", null)
+            .show()
     }
 
     /** 一键导出（默认 44100） */
@@ -434,7 +612,7 @@ class MainActivity : Activity() {
         banner.visibility = View.VISIBLE
         // 诊断条会盖住内容，把内容整体下移
         (content.layoutParams as? FrameLayout.LayoutParams)?.let {
-            it.topMargin = dp(74) + dp(46)
+            it.topMargin = chromeTop + dp(46)
             content.layoutParams = it
         }
     }
@@ -456,7 +634,7 @@ class MainActivity : Activity() {
             appendLine("== 崩溃日志 ==")
             appendLine(CrashGuard.fullLog(this@MainActivity))
         }
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("诊断信息")
             .setMessage(log)
             .setPositiveButton("复制") { _, _ ->
@@ -482,7 +660,7 @@ class MainActivity : Activity() {
     private fun showAddTrackDialog() {
         val insts = com.volt.flowstudio.model.Instrument.values()
         val names = insts.map { it.cn }.toTypedArray()
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("添加通道")
             .setItems(names) { _, which ->
                 val inst = insts[which]
@@ -501,6 +679,48 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun showTrackActions(idx: Int) {
+        val track = session.project.trackAt(idx) ?: return
+        session.project.selectedTrack = idx
+        refreshAll(session.project)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(track.name)
+            .setItems(arrayOf("音色与参数", "重命名通道", "删除通道")) { _, which ->
+                when (which) {
+                    0 -> openSoundPanel(idx)
+                    1 -> showRenameTrackDialog(idx)
+                    2 -> removeTrack(idx)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showRenameTrackDialog(idx: Int) {
+        val track = session.project.trackAt(idx) ?: return
+        val input = android.widget.EditText(this).apply {
+            setText(track.name)
+            setSelectAllOnFocus(true)
+            maxLines = 1
+        }
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("重命名通道")
+            .setView(input)
+            .setPositiveButton("应用") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) {
+                    toast("通道名不能为空")
+                } else {
+                    track.name = name.take(24)
+                    session.scheduleAutoSave()
+                    refreshAll(session.project)
+                    toast("已重命名为 ${track.name}")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun removeTrack(idx: Int) {
         val p = session.project
         val t = p.trackAt(idx) ?: return
@@ -508,7 +728,7 @@ class MainActivity : Activity() {
             toast("至少要留一条通道")
             return
         }
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("删除通道「${t.name}」？")
             .setMessage("这个通道在播放列表里的片段和所有样式里的音符都会一起删掉。")
             .setPositiveButton("删除") { _, _ ->
@@ -549,7 +769,7 @@ class MainActivity : Activity() {
         if (files.isNotEmpty()) items.add("──────────")
         files.forEach { items.add("📂 ${it.nameWithoutExtension}") }
 
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("工程")
             .setItems(items.toTypedArray()) { _, which ->
                 when {
@@ -583,7 +803,7 @@ class MainActivity : Activity() {
             setText(session.project.name)
             setSelectAllOnFocus(true)
         }
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("另存为")
             .setView(input)
             .setPositiveButton("保存") { _, _ ->
@@ -600,11 +820,11 @@ class MainActivity : Activity() {
             return
         }
         val names = files.map { it.nameWithoutExtension }.toTypedArray()
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("删除工程")
             .setItems(names) { _, which ->
                 val f = files[which]
-                android.app.AlertDialog.Builder(this)
+                android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                     .setTitle("确认删除「${f.nameWithoutExtension}」？")
                     .setMessage("文件会被删掉，不能恢复。")
                     .setPositiveButton("删除") { _, _ ->
@@ -623,7 +843,7 @@ class MainActivity : Activity() {
         val rates = arrayOf("44100 Hz（CD 标准）", "48000 Hz（视频常用）", "22050 Hz（小文件）")
         val rateVals = intArrayOf(44100, 48000, 22050)
         var chosen = 0
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("导出 WAV")
             .setSingleChoiceItems(rates, 0) { _, which -> chosen = which }
             .setPositiveButton("开始") { _, _ ->
@@ -634,7 +854,7 @@ class MainActivity : Activity() {
                     if (file != null) {
                         // 明确告诉用户文件在哪 —— 之前的毛病就是"导出成功但找不到"
                         val where = session.exportDirHint()
-                        android.app.AlertDialog.Builder(this)
+                        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                             .setTitle("导出完成")
                             .setMessage(
                                 "文件：${file.name}\n" +
@@ -671,7 +891,7 @@ class MainActivity : Activity() {
             })
             addView(sb)
         }
-        android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("摇摆 / Swing")
             .setView(wrap)
             .setPositiveButton("应用") { _, _ ->
@@ -699,3 +919,4 @@ class MainActivity : Activity() {
         return false
     }
 }
+
