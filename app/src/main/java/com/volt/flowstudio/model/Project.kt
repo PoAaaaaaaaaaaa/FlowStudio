@@ -88,6 +88,52 @@ class Project {
         return end - startTick
     }
 
+    /** 复制一批片段（返回新 id 的副本，还没加进工程） */
+    fun copyClips(ids: Set<Int>): List<Clip> {
+        val sel = clips.filter { it.id in ids }
+        if (sel.isEmpty()) return emptyList()
+        val minStart = sel.minOf { it.start }
+        return sel.map { c ->
+            val copy = c.copyClip(nextClipId++)
+            copy.start = c.start - minStart      // 归一化到 0，粘贴时再定位
+            copy
+        }
+    }
+
+    /**
+     * 粘贴到指定位置和轨道。保持原来的相对间隔与轨道关系。
+     * 会避开已有片段：如果落点被占，整体往后挪到空处，
+     * 否则会出现两个片段叠在同一条轨道上互相吃掉。
+     */
+    fun pasteClips(copies: List<Clip>, atTick: Int, atTrack: Int): List<Clip> {
+        if (copies.isEmpty()) return emptyList()
+        val baseTrack = copies.minOf { it.track }
+        val trackShift = atTrack - baseTrack
+
+        var offset = 0
+        var attempt = 0
+        var placed: List<Clip>
+
+        while (true) {
+            placed = copies.map { c ->
+                val n = c.copyClip(nextClipId++)
+                n.start = c.start + atTick + offset
+                n.track = (c.track + trackShift).coerceIn(0, tracks.size - 1)
+                n
+            }
+            val clash = placed.any { np ->
+                clips.any { ex -> ex.track == np.track && ex.start < np.start + np.length && ex.end > np.start }
+            }
+            if (!clash) break
+            // 依次往后让半个小节，最多试 64 次
+            offset += Note.BAR / 2
+            attempt++
+            if (attempt > 64) break
+        }
+        clips.addAll(placed)
+        return placed
+    }
+
     fun overlapClip(track: Int, start: Int, end: Int, ignoreId: Int = -1): Clip? =
         clips.firstOrNull { it.track == track && it.id != ignoreId && it.start < end && it.end > start }
 

@@ -70,6 +70,38 @@ class StudioBridge(
 
     fun bumpRevision() { revision++ }
 
+    // ---- 实时推送：SSE 订阅者 ----
+    // 插件订阅 /events 后，软件里任何变化都会立刻推过去。
+    // 轮询做不到"实时"，而且高频轮询会白白吃电。
+    private val subscribers = java.util.concurrent.CopyOnWriteArrayList<OutputStream>()
+
+    /** 广播一条事件给所有订阅者 */
+    fun broadcast(type: String, data: JSONObject) {
+        if (subscribers.isEmpty()) return
+        val payload = buildString {
+            append("data: ")
+            append(JSONObject().put("type", type)
+                .put("revision", revision)
+                .put("time", System.currentTimeMillis())
+                .put("payload", data)
+                .toString())
+            append("\n\n")
+        }
+        val bytes = payload.toByteArray(Charsets.UTF_8)
+        val dead = mutableListOf<OutputStream>()
+        for (out in subscribers) {
+            try {
+                out.write(bytes)
+                out.flush()
+            } catch (t: Throwable) {
+                dead.add(out)
+            }
+        }
+        subscribers.removeAll(dead)
+    }
+
+    fun subscriberCount(): Int = subscribers.size
+
     private var server: ServerSocket? = null
     private val stop = AtomicBoolean(false)
     private val pool = Executors.newFixedThreadPool(4) { r ->
@@ -176,7 +208,11 @@ class StudioBridge(
             val out = s.getOutputStream()
             try {
                 val (status, payload) = route(method, pathWithQuery, body, authHeader)
-                respond(out, status, payload)
+                if (status == -1) {
+                    streamEvents(out, pathWithQuery)
+                } else {
+                    respond(out, status, payload)
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "处理 ${method} $pathWithQuery 出错", t)
                 respond(out, 500, JSONObject().put("error", t.message ?: t.javaClass.simpleName))
@@ -229,6 +265,11 @@ class StudioBridge(
             return 401 to JSONObject().put("error", "缺少或错误的 Authorization")
         }
 
+        // SSE 长连接要单独处理：它不能走上面的"返回 JSON 立即结束"流程
+        if (method == "GET" && path == "/events") {
+            return -1 to JSONObject()   // 由 handle() 里的特殊分支接走
+        }
+
         return try {
             when {
                 method == "GET" && path == "/state" -> 200 to stateJson()
@@ -236,13 +277,19 @@ class StudioBridge(
                 method == "PUT" && path == "/project" -> handlePutProject(body, query)
                 method == "GET" && path == "/transport" -> 200 to transportJson()
                 method == "POST" && path == "/transport/play" -> {
-                    session.play(); 200 to transportJson()
+                    session.play()
+                    broadcast("transport", transportJson())
+                    200 to transportJson()
                 }
                 method == "POST" && path == "/transport/pause" -> {
-                    session.pause(); 200 to transportJson()
+                    session.pause()
+                    broadcast("transport", transportJson())
+                    200 to transportJson()
                 }
                 method == "POST" && path == "/transport/stop" -> {
-                    session.stop(); 200 to transportJson()
+                    session.stop()
+                    broadcast("transport", transportJson())
+                    200 to transportJson()
                 }
                 method == "POST" && path == "/transport/seek" -> {
                     val tick = query["tick"]?.toIntOrNull() ?: 0
@@ -291,6 +338,96 @@ class StudioBridge(
             }
         } catch (t: Throwable) {
             500 to JSONObject().put("error", t.message ?: t.javaClass.simpleName)
+        }
+    }
+
+    /**
+     * SSE 长连接：插件订阅后，软件里的变化会立刻推过去。
+     *
+     * 每 15 秒发一个心跳注释，防止中间设备把空闲连接掐掉。
+     * 用 SSE 而不是 WebSocket：协议就是纯文本，插件侧不需要额外依赖，
+     * 而且断线重连的语义天然正确（浏览器/客户端都会自动重试）。
+     */
+    private fun streamEvents(out: OutputStream, pathWithQuery: String) {
+        val q = if (pathWithQuery.contains('?')) parseQuery(pathWithQuery.substringAfter('?')) else emptyMap()
+
+        // 带上事件类型过滤：插件可以只要 transport 事件，不必被音符事件淹没
+        val want = q["types"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+
+        val header = buildString {
+            append("HTTP/1.1 200 OK\r\n")
+            append("Content-Type: text/event-stream; charset=utf-8\r\n")
+            append("Cache-Control: no-cache\r\n")
+            append("Connection: keep-alive\r\n")
+            append("X-Accel-Buffering: no\r\n")
+            append("\r\n")
+        }
+        out.write(header.toByteArray(Charsets.US_ASCII))
+        out.flush()
+
+        // 首帧：把当前状态立刻给一份，插件不用再多打一次 /state
+        runCatching {
+            val hello = buildString {
+                append("data: ")
+                append(JSONObject().put("type", "hello")
+                    .put("revision", revision)
+                    .put("time", System.currentTimeMillis())
+                    .put("payload", stateJson())
+                    .toString())
+                append("\n\n")
+            }
+            out.write(hello.toByteArray(Charsets.UTF_8))
+            out.flush()
+        }
+
+        // 包装一层，按订阅者的过滤规则转发
+        val sink = object : OutputStream() {
+            override fun write(b: Int) {
+                // 逐字节写入用不到，交给下面的批量路径
+                out.write(b)
+            }
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                if (len <= 0) return
+                if (want == null) {
+                    out.write(b, off, len)
+                    out.flush()
+                    return
+                }
+                // 需要过滤：解析出 type 再决定
+                val text = String(b, off, len, Charsets.UTF_8)
+                val line = text.lineSequence().firstOrNull { it.startsWith("data: ") } ?: return
+                val json = runCatching { JSONObject(line.removePrefix("data: ")) }.getOrNull() ?: return
+                val type = json.optString("type", "")
+                if (type in want || type == "hello") {
+                    out.write(b, off, len)
+                    out.flush()
+                }
+            }
+            override fun flush() { out.flush() }
+        }
+
+        subscribers.add(sink)
+        val count = subscribers.size
+        android.util.Log.i("FlowBridge", "SSE 订阅 +1，当前 $count 个")
+
+        try {
+            // 阻塞在这个线程上，直到客户端断开或服务停止。
+            // 心跳同时用来探测连接是否还活着（写失败即断）。
+            while (!stop.get() && running) {
+                Thread.sleep(15000)
+                try {
+                    out.write(": heartbeat\n\n".toByteArray(Charsets.UTF_8))
+                    out.flush()
+                } catch (t: Throwable) {
+                    break
+                }
+            }
+        } catch (t: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            subscribers.remove(sink)
+            runCatching { out.close() }
+            android.util.Log.i("FlowBridge", "SSE 订阅 -1，剩余 ${subscribers.size} 个")
         }
     }
 
@@ -431,6 +568,10 @@ class StudioBridge(
         }
         session.replaceProject(loaded)
         bumpRevision()
+        broadcast("project", JSONObject()
+            .put("name", loaded.name)
+            .put("tracks", loaded.tracks.size)
+            .put("patterns", loaded.patterns.size))
         return 200 to JSONObject()
             .put("ok", true)
             .put("revision", revision)
@@ -491,6 +632,7 @@ class StudioBridge(
 
         session.pushTrack(index)
         session.scheduleAutoSave()
+        broadcast("track", JSONObject().put("index", index))
         return 200 to JSONObject().put("ok", true).put("index", index)
     }
 
@@ -556,6 +698,8 @@ class StudioBridge(
         session.pushBpm()
         session.scheduleAutoSave()
         bumpRevision()
+        broadcast("pattern", JSONObject()
+            .put("patternId", patId).put("track", trackIdx).put("notes", list.size))
         return 200 to JSONObject()
             .put("ok", true)
             .put("revision", revision)

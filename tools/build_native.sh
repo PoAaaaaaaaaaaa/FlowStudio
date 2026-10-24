@@ -75,7 +75,7 @@ CLANG_RT="$TC/lib/clang/17/lib/linux/aarch64"
   "$TC/sysroot/usr/lib/$ABI/libc++_static.a" \
   "$TC/sysroot/usr/lib/$ABI/libc++abi.a" \
   "$CLANG_RT/libunwind.a" \
-  -landroid -laaudio -llog -lc -lm -ldl
+  -landroid -laaudio -lOpenSLES -llog -lc -lm -ldl
 
 # 链接完立刻查：所有 __aarch64_* 原子符号必须已被消解，
 # 否则这就是一个"装得上、跑不了"的包。

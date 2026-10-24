@@ -186,6 +186,15 @@ void Voice::setup(Instrument i, int32_t pitchIn, float vel, int32_t endTickIn, i
 bool Voice::render(float* outL, float* outR, int n, const float* p, float sr) {
     if (!active) return false;
 
+    // 试听音符的倒计时：到点就释放，不依赖传输位置。
+    if (manualReleaseSamples > 0 && !released) {
+        manualReleaseSamples -= n;
+        if (manualReleaseSamples <= 0) {
+            manualReleaseSamples = 0;
+            release();
+        }
+    }
+
     const float velGain = velocity;
     const float invSr = 1.f / sr;
 

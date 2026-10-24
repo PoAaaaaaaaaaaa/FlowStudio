@@ -180,6 +180,9 @@ class StudioSession(private val context: Context) {
         if (!engine.available) return
         val len = project.lengthTicks()
         engine.setPosition(ticks.coerceIn(0, len).toDouble())
+        runCatching {
+            bridge?.broadcast("seek", org.json.JSONObject().put("positionTicks", ticks))
+        }
     }
 
     fun setLoop(on: Boolean, startTicks: Int, endTicks: Int) {
@@ -321,6 +324,17 @@ class StudioSession(private val context: Context) {
     /** 改完东西调一下，几秒后自动落盘，防丢。 */
     fun scheduleAutoSave() {
         bridge?.bumpRevision()
+        // 用户手动改动也推给订阅者：插件必须知道"我手上的快照过期了"。
+        // 这是"实时更新软件状态"里最难的一半 —— 插件主动查很简单，
+        // 让软件主动告诉插件才叫实时。
+        runCatching {
+            bridge?.broadcast("edit", org.json.JSONObject()
+                .put("name", project.name)
+                .put("bpm", project.bpm.toDouble())
+                .put("tracks", project.tracks.size)
+                .put("patternCount", project.patterns.size)
+                .put("clipCount", project.clips.size))
+        }
         autoSaveRunnable?.let { main.removeCallbacks(it) }
         val r = Runnable { save(null) }
         autoSaveRunnable = r
@@ -351,10 +365,14 @@ class StudioSession(private val context: Context) {
         val wasPlaying = isPlaying()
         stopPlayback()
 
-        val outFile = File(
-            File(context.getExternalFilesDir(null) ?: context.filesDir, "exports").apply { mkdirs() },
-            "${project.name}-${System.currentTimeMillis()}.wav"
-        )
+        // 导出位置：优先写公共 Music 目录，用户能在文件管理器和音乐播放器里直接看到。
+        // 之前只写 getExternalFilesDir()，那是应用私有外部目录，
+        // 文件管理器默认不显示，用户以为"没生成文件"。
+        val fileName = "${project.name.replace(Regex("[\\\\/:*?\"<>|]"), "_")}-${
+            java.text.SimpleDateFormat("MMdd-HHmm", java.util.Locale.US).format(java.util.Date())
+        }.wav"
+
+        val outFile = chooseExportFile(fileName)
 
         io.execute {
             val data = engine.renderOffline(start.toDouble(), end.toDouble(), sampleRate)
@@ -387,6 +405,63 @@ class StudioSession(private val context: Context) {
                     .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
+    }
+
+    /**
+     * 选一个用户能找到的导出位置。
+     *
+     * 顺序：
+     *   1. 公共 Music/FlowStudio —— 文件管理器、音乐播放器都能看到
+     *   2. 应用外部私有目录 —— 没有存储权限时的退路，至少文件真的存在
+     *   3. 内部私有目录 —— 最后兜底
+     *
+     * 每一层都要能真正创建成功，拿不到就往下走。
+     */
+    private fun chooseExportFile(fileName: String): File {
+        val candidates = listOfNotNull(
+            // 公共音乐目录（Android 10+ 直接可写，无需权限）
+            runCatching {
+                File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_MUSIC
+                    ),
+                    "FlowStudio"
+                )
+            }.getOrNull(),
+            // 应用外部私有目录
+            runCatching { File(context.getExternalFilesDir(null), "exports") }.getOrNull(),
+            // 内部目录
+            File(context.filesDir, "exports")
+        )
+
+        for (dir in candidates) {
+            val ok = runCatching {
+                dir.mkdirs()
+                dir.isDirectory && dir.canWrite()
+            }.getOrDefault(false)
+            if (ok) {
+                return File(dir, fileName)
+            }
+            android.util.Log.w("FlowStudio", "导出目录不可用: ${dir.absolutePath}")
+        }
+        // 全都不行也得给个路径，让上层报错而不是静默失败
+        return File(context.filesDir, "exports/$fileName")
+    }
+
+    /** 导出目录的展示路径，界面上告诉用户去哪找 */
+    fun exportDirHint(): String {
+        val music = runCatching {
+            File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_MUSIC
+                ),
+                "FlowStudio"
+            )
+        }.getOrNull()
+        if (music != null && music.isDirectory) return "Music/FlowStudio"
+        val ext = runCatching { context.getExternalFilesDir(null) }.getOrNull()
+        if (ext != null) return "Android/data/${context.packageName}/files/exports"
+        return "应用私有目录"
     }
 
     private fun writeWav(file: File, interleaved: FloatArray, sampleRate: Int) {

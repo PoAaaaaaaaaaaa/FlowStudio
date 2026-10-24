@@ -213,8 +213,23 @@ Channel Engine::getTrackConfig(int index) const {
 void Engine::setTrackNote(int index, int pitch, float velocity, int durationTicks) {
     if (index < 0 || index >= kMaxTracks) return;
     if (durationTicks <= 0) durationTicks = kStep;
+
+    // 试听的音符不能靠 endTick 释放：停止状态下 position_ 不前进，
+    // endTick 永远到不了，声部会一直挂着。
+    // 这里用一个"按样本倒计时"的独立机制，它不依赖传输状态。
     const int32_t endTick = (int32_t)position_.load() + durationTicks;
     triggerNote(index, pitch, velocity, endTick);
+
+    // 找到刚触发的那个声部，给它挂上真实的时间限制
+    for (auto& v : voices_) {
+        if (v.active && !v.released && v.track == index &&
+            v.pitch == pitch + channels_[(size_t)index].transpose) {
+            const float sr = sampleRate_;
+            v.manualReleaseSamples = (int32_t)((float)std::max(1, durationTicks) /
+                (float)std::max(1.0, (double)bpm_.load() * kPPQ / 60.0) * sr);
+            break;
+        }
+    }
 }
 
 void Engine::releaseTrackNote(int index) {

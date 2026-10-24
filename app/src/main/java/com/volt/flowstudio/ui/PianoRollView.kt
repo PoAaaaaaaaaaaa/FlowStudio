@@ -58,6 +58,11 @@ class PianoRollView @JvmOverloads constructor(
     private var origStart = 0
     private var origLen = 0
     private var origPitch = 0
+    // 双指手势：平移 + 缩放
+    private var twoFinger = false
+    private var lastPinchDist = 0f
+    private var lastPanX = 0f
+    private var lastPanY = 0f
     private var marqueeL = 0f
     private var marqueeT = 0f
     private var marqueeR = 0f
@@ -353,6 +358,35 @@ class PianoRollView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_MOVE -> {
+                if (twoFinger && e.pointerCount >= 2) {
+                    val d = dist(e)
+                    // 捏合缩放：比例直接作用在 zoom 上，0.5..8 之间
+                    if (lastPinchDist > 1f && d > 1f) {
+                        val k = d / lastPinchDist
+                        if (k.isFinite() && k > 0f) {
+                            zoom = (zoom * k).coerceIn(0.5f, 8f)
+                        }
+                    }
+                    lastPinchDist = d
+
+                    // 平移：横向改时间滚动，纵向改音高范围
+                    val dx = midX(e) - lastPanX
+                    val dy = midY(e) - lastPanY
+                    if (dx.isFinite()) {
+                        scrollTicks = (scrollTicks - dx / pixelsPerTick()).coerceAtLeast(0f)
+                    }
+                    if (dy.isFinite()) {
+                        val rows = (dy / keyHeight).toInt()
+                        if (rows != 0) {
+                            lowestNote = (lowestNote + rows).coerceIn(0, 127)
+                        }
+                    }
+                    lastPanX = midX(e)
+                    lastPanY = midY(e)
+                    invalidate()
+                    return true
+                }
+
                 val ppt = pixelsPerTick()
                 val rowH = keyHeight
                 val n = activeNote
@@ -407,6 +441,7 @@ class PianoRollView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                twoFinger = false
                 if (mode != Mode.NONE && mode != Mode.MARQUEE) {
                     onNotesChanged?.invoke()
                 }
@@ -417,15 +452,33 @@ class PianoRollView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // 双指拖动 = 横向平移 + 纵向滚动
+                // 双指：拖动平移、捏合缩放。这是编曲最常用的手势，必须有。
                 if (e.pointerCount >= 2) {
                     mode = Mode.NONE
+                    activeNote = null
+                    twoFinger = true
+                    lastPinchDist = dist(e)
+                    lastPanX = midX(e)
+                    lastPanY = midY(e)
                 }
                 return true
             }
         }
         return true
     }
+
+    private fun dist(e: MotionEvent): Float {
+        if (e.pointerCount < 2) return 0f
+        val dx = e.getX(0) - e.getX(1)
+        val dy = e.getY(0) - e.getY(1)
+        return kotlin.math.hypot(dx, dy)
+    }
+
+    private fun midX(e: MotionEvent): Float =
+        if (e.pointerCount < 2) e.x else (e.getX(0) + e.getX(1)) / 2f
+
+    private fun midY(e: MotionEvent): Float =
+        if (e.pointerCount < 2) e.y else (e.getY(0) + e.getY(1)) / 2f
 
     private val MotionEvent.isShiftPressed: Boolean
         get() = (metaState and android.view.KeyEvent.META_SHIFT_ON) != 0

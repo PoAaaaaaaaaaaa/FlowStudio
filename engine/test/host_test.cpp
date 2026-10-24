@@ -290,6 +290,54 @@ int main() {
         check(e.trackCount() >= 4, msg);
     }
 
+    // ---------- 10. 回归：停止状态下试听必须出声，并且会自动结束 ----------
+    // 之前的 bug：setTrackNote 用 position_ + duration 算结束时刻，
+    // 停止时 position_ 不前进，声部永远不释放。表现为"点试听没反应"，
+    // 或者声音一直挂着。现在用样本倒计时，不依赖传输状态。
+    {
+        Engine e;
+        e.prepare((float)SR, 512);
+        e.setBpm(120.f);
+        e.clearTracks();
+        Channel ch = makeChannel(Instrument::Synth, 0.8f);
+        e.setTrackConfig(0, ch);
+        e.setMaster(0.8f, false, false, 0.f);
+
+        // 完全不进入播放状态，直接试听
+        e.setTrackNote(0, 60, 0.8f, kPPQ);   // 一拍 = 0.5 秒
+
+        std::vector<float> buf(2048 * 2);
+        float peak = 0.f;
+        // 先渲染 0.4 秒，应该有声
+        int framesRendered = 0;
+        const int chunk = 512;
+        while (framesRendered < SR * 4 / 10) {
+            e.processBlockForTest(buf.data(), chunk);
+            for (int i = 0; i < chunk; i++) peak = std::max(peak, std::fabs(buf[(size_t)(i*2)]));
+            framesRendered += chunk;
+        }
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "停止状态下试听有声 peak=%.3f", peak);
+        check(peak > 0.01f, msg);
+
+        // 再渲染 2 秒，声部应该已经释放
+        int activeAfter = 0;
+        for (int k = 0; k < (SR * 2) / chunk; k++) {
+            e.processBlockForTest(buf.data(), chunk);
+        }
+        // 用 allNotesOff 之后再测一次残响，检查是否已静音
+        float tailPeak = 0.f;
+        for (int k = 0; k < 8; k++) {
+            e.processBlockForTest(buf.data(), chunk);
+            for (int i = 0; i < chunk; i++) {
+                tailPeak = std::max(tailPeak, std::fabs(buf[(size_t)(i*2)]));
+            }
+        }
+        std::snprintf(msg, sizeof(msg), "试听结束后自动静音 tailPeak=%.4f", tailPeak);
+        check(tailPeak < 0.01f, msg);
+        (void)activeAfter;
+    }
+
     std::printf("\n%s  失败 %d 项\n", gFail == 0 ? "全部通过" : "有失败", gFail);
     return gFail == 0 ? 0 : 1;
 }

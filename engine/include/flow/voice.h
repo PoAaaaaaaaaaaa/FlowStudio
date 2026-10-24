@@ -26,6 +26,13 @@ struct Voice {
     int32_t endTick = 0;
     int16_t track = 0;
 
+    /**
+     * 样本倒计时：>0 时每个采样减一，到 0 自动释放。
+     * 试听（previewNote）用它，因为停止状态下 tick 不会前进，
+     * 靠 endTick 判断结束的声部会永远挂着。
+     */
+    int32_t manualReleaseSamples = 0;
+
     Instrument inst = Instrument::Synth;
 
     // 振荡器

@@ -449,6 +449,33 @@ class MainActivity : Activity() {
             appendLine("== 原生库 ==")
             appendLine(NativeLib.status)
             appendLine()
+
+            // 音频链路自检：这几项直接决定"有没有声音"
+            appendLine("== 音频引擎 ==")
+            val dev = session.project
+            appendLine("引擎可用: ${session.engine.available}")
+            appendLine("音频流运行中: ${session.engine.isAudioRunning()}")
+            appendLine("采样率: ${session.engine.sampleRate().toInt()} Hz")
+            appendLine("轨道数: ${dev.tracks.size}")
+            appendLine("样式数: ${dev.patterns.size}")
+            appendLine("片段数: ${dev.clips.size}")
+            appendLine("总长度: ${dev.lengthBars()} 小节")
+            appendLine("节拍器: ${dev.metronomeVolume}")
+            appendLine("摇摆: ${(dev.swing * 100).toInt()}%")
+            appendLine()
+            appendLine("== 桥接 ==")
+            val br = session.bridge
+            if (br == null) {
+                appendLine("未启动")
+            } else {
+                appendLine("运行中: ${br.running}  端口: ${br.port}")
+                appendLine("引擎不可用: ${!session.engine.available}")
+                appendLine("令牌长度: ${br.token.length}")
+            }
+            appendLine()
+            appendLine("== 导出目录 ==")
+            appendLine(session.exportDirHint())
+            appendLine()
             appendLine("== 崩溃日志 ==")
             appendLine(CrashGuard.fullLog(this@MainActivity))
         }
@@ -628,10 +655,21 @@ class MainActivity : Activity() {
                 toast("渲染中…")
                 session.exportWav(0, p.lengthTicks(), sr) { file ->
                     if (file != null) {
-                        toast("已导出 ${file.name}")
-                        session.shareFile(file)
+                        // 明确告诉用户文件在哪 —— 之前的毛病就是"导出成功但找不到"
+                        val where = session.exportDirHint()
+                        android.app.AlertDialog.Builder(this)
+                            .setTitle("导出完成")
+                            .setMessage(
+                                "文件：${file.name}\n" +
+                                "大小：${"%.1f".format(file.length() / 1024.0 / 1024.0)} MB\n" +
+                                "位置：$where\n\n" +
+                                "可以在「文件管理 → 音频/Music」里找到，也可以用下面的按钮直接分享。"
+                            )
+                            .setPositiveButton("分享") { _, _ -> session.shareFile(file) }
+                            .setNegativeButton("知道了", null)
+                            .show()
                     } else {
-                        toast("导出失败")
+                        toast("导出失败：引擎没有返回音频数据")
                     }
                 }
             }

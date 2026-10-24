@@ -3,6 +3,10 @@
     package="com.volt.flowstudio">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 只用于把导出的 WAV 放进公共 Music 目录，Android 10 以下需要 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

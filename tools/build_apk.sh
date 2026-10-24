@@ -12,8 +12,8 @@ BUILD_TOOLS=/usr/lib/android-sdk/build-tools/debian
 
 MIN_SDK=26
 API=34
-VERSION_NAME="${VERSION_NAME:-1.0.3}"
-VERSION_CODE="${VERSION_CODE:-4}"
+VERSION_NAME="${VERSION_NAME:-1.0.4}"
+VERSION_CODE="${VERSION_CODE:-5}"
 
 echo "== 0. 原生库 =="
 "$ROOT/tools/build_native.sh"
