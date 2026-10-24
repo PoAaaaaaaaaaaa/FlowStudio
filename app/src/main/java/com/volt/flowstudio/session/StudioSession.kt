@@ -43,6 +43,38 @@ class StudioSession(private val context: Context) {
     var onLoaded: ((Project) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    /** 外部（插件/桥接）改完工程后触发，让界面立即重绘，而不是等用户切页签。 */
+    var onExternalEdit: ((String) -> Unit)? = null
+
+    /** 最近一次 AI 写入前的工程快照，供一键撤销。 */
+    private var undoSnapshot: String? = null
+    private var undoLabel: String = ""
+
+    fun hasUndo(): Boolean = undoSnapshot != null
+    fun undoLabel(): String = undoLabel
+
+    fun rememberSnapshot(label: String) {
+        undoSnapshot = project.toText()
+        undoLabel = label
+    }
+
+    /** 撤销最近一次外部写入；返回是否成功。 */
+    fun undoExternalEdit(): Boolean {
+        val snap = undoSnapshot ?: return false
+        val p = Project.fromText(snap) ?: return false
+        project = p
+        pushAll()
+        undoSnapshot = null
+        onLoaded?.invoke(p)
+        scheduleAutoSave()
+        return true
+    }
+
+    /** 通知界面：外部写完了，刷新一次。 */
+    fun notifyExternalEdit(label: String) {
+        onExternalEdit?.invoke(label)
+    }
+
     // ---------------------------------------------------------------- 生命周期
 
     /**
@@ -542,3 +574,4 @@ class StudioSession(private val context: Context) {
         file.writeBytes(out.toByteArray())
     }
 }
+

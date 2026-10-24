@@ -9,6 +9,16 @@ class Project {
     var bpm: Float = 128f
     var beatsPerBar: Int = 4
 
+    /** 拍号分母（4 = 四分音符为一拍，8 = 八分，16 = 十六分）。 */
+    var beatUnit: Int = 4
+
+    /** 调性提示，只影响编辑器的约束与 AI 生成，不锁死音符。 */
+    var keyRoot: String = "C"
+    var scaleName: String = "chromatic"
+
+    /** 每小节的 tick 数，非 4/4 拍也能算对。 */
+    val barTicks: Int get() = beatsPerBar * (Note.PPQ * 4 / beatUnit)
+
     /** 摇摆量 0..1，0 是正拍。0.5 大约是三连音的摇摆感。 */
     var swing: Float = 0f
 
@@ -42,8 +52,19 @@ class Project {
     fun patternIndexOf(id: Int): Int = patterns.indexOfFirst { it.id == id }
     fun trackAt(i: Int): Track? = tracks.getOrNull(i)
 
-    fun lengthTicks(): Int = maxOf(Note.BAR * 16, clips.maxOfOrNull { it.end } ?: 0)
-    fun lengthBars(): Int = (lengthTicks() + Note.BAR - 1) / Note.BAR
+    fun lengthTicks(): Int = maxOf(barTicks * 16, clips.maxOfOrNull { it.end } ?: 0)
+    fun lengthBars(): Int = (lengthTicks() + barTicks - 1) / barTicks
+
+    /** 在第 bar 小节（从 0 起）包一根时间线上的片段。 */
+    fun clipsAtBar(bar: Int): List<Clip> {
+        val start = bar * barTicks
+        val end = start + barTicks
+        return clips.filter { it.start < end && it.end > start }
+    }
+
+    /** 是否已有同轨同时间的片段，用来避免 AI 叠出互相吃掉的内容。 */
+    fun clipOverlaps(track: Int, start: Int, end: Int, ignoreId: Int = -1): Clip? =
+        clips.firstOrNull { it.id != ignoreId && it.track == track && it.start < end && it.end > start }
 
     fun anySolo(): Boolean = tracks.any { it.solo }
 
@@ -197,6 +218,9 @@ class Project {
         put("name", name)
         put("bpm", bpm.toDouble())
         put("beatsPerBar", beatsPerBar)
+        put("beatUnit", beatUnit)
+        put("keyRoot", keyRoot)
+        put("scaleName", scaleName)
         put("swing", swing.toDouble())
         put("metronomeVolume", metronomeVolume.toDouble())
         put("masterVolume", masterVolume)
@@ -224,7 +248,10 @@ class Project {
             val p = Project()
             p.name = o.optString("name", "工程")
             p.bpm = o.optDouble("bpm", 128.0).toFloat().coerceIn(20f, 300f)
-            p.beatsPerBar = o.optInt("beatsPerBar", 4)
+            p.beatsPerBar = o.optInt("beatsPerBar", 4).coerceIn(1, 32)
+            p.beatUnit = o.optInt("beatUnit", 4).let { if (it in listOf(2, 4, 8, 16)) it else 4 }
+            p.keyRoot = o.optString("keyRoot", "C")
+            p.scaleName = o.optString("scaleName", "chromatic")
             p.swing = o.optDouble("swing", 0.0).toFloat().coerceIn(0f, 1f)
             p.metronomeVolume = o.optDouble("metronomeVolume", 0.6).toFloat().coerceIn(0f, 1f)
             p.masterVolume = o.optInt("masterVolume", 80).coerceIn(0, 100)
@@ -409,3 +436,4 @@ class Project {
         }
     }
 }
+

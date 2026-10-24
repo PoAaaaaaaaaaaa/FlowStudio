@@ -526,6 +526,24 @@ class StudioBridge(
                 }
                 method == "GET" && path == "/projects" -> 200 to projectsJson()
                 method == "POST" && path == "/projects/open" -> handleOpenProject(body)
+                // ---- 1.14 批量与结构编辑 ----
+                method == "GET" && path == "/capabilities" -> 200 to capabilitiesJson()
+                method == "POST" && path == "/batch" -> handleBatch(body)
+                method == "GET" && path == "/clips" -> 200 to clipsJson()
+                method == "POST" && path == "/clips/arrange" -> handleArrangeClips(body)
+                method == "PATCH" && path.startsWith("/clips/") ->
+                    handlePatchClip(path.removePrefix("/clips/").toIntOrNull(), body)
+                method == "POST" && path == "/automation" -> handleUpsertAutomation(body)
+                method == "DELETE" && path == "/automation" ->
+                    handleDeleteAutomation(path, query)
+                method == "POST" && path == "/pattern/create" -> handleCreatePattern(body)
+                method == "PATCH" && path.startsWith("/patterns/") ->
+                    handlePatchPattern(path.removePrefix("/patterns/").toIntOrNull(), body)
+                method == "DELETE" && path.startsWith("/patterns/") ->
+                    handleDeletePattern(path.removePrefix("/patterns/").toIntOrNull())
+                method == "POST" && path == "/tracks/reorder" -> handleReorderTracks(body)
+                method == "POST" && path == "/undo" -> handleUndo()
+                method == "POST" && path == "/selection" -> handleSelection(body)
                 else -> 404 to JSONObject().put("error", "没有这个接口: $method $path")
             }
         } catch (t: Throwable) {
@@ -1157,4 +1175,498 @@ class StudioBridge(
         if (!ok) return 503 to JSONObject().put("error", "应用繁忙，加载没开始")
         return 200 to JSONObject().put("ok", true).put("loading", name)
     }
+
+    // ==================================================================
+    // 1.14 扩展：能力探测 / 批量编辑 / 结构编辑 / 撤销
+    // ==================================================================
+
+    /** 能力清单：插件据此决定调哪个接口，而不是猜版本。 */
+    private fun capabilitiesJson(): JSONObject {
+        val instArr = JSONArray()
+        Instrument.values().forEach { inst ->
+            val labels = JSONArray()
+            inst.paramLabels().forEach { labels.put(it) }
+            instArr.put(JSONObject()
+                .put("id", inst.name)
+                .put("cn", inst.cn)
+                .put("params", labels))
+        }
+        val fxArr = JSONArray()
+        EffectType.values().forEach { fx ->
+            fxArr.put(JSONObject()
+                .put("id", fx.name)
+                .put("cn", fx.cn)
+                .put("knobs", fx.knobCount))
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("app", "FlowStudio")
+            .put("version", session.versionName())
+            .put("protocol", 2)
+            .put("revision", revision)
+            .put("instruments", instArr)
+            .put("effects", fxArr)
+            .put("features", JSONArray(listOf(
+                "batch", "clips.arrange", "clips.patch", "automation.upsert",
+                "pattern.create", "pattern.patch", "pattern.delete", "tracks.reorder",
+                "undo", "selection", "events.longpoll", "events.sse",
+                "notes.fine", "track.group"
+            )))
+            .put("limits", JSONObject()
+                .put("batchOps", 200)
+                .put("patterns", 256)
+                .put("tracks", 64)
+                .put("clipTicksMax", 480 * 4 * 64))
+    }
+
+    /**
+     * 批量编辑：一次请求内按顺序执行多条操作。
+     * 语义是全有或全无：先整体校验，任何一条非法就不落任何改动。
+     * 这是 AI 最需要的入口——写一首歌要几十次编辑，逐条发请求既慢又容易只改一半。
+     */
+    private fun handleBatch(body: String): Pair<Int, JSONObject> {
+        val root = JSONObject(body)
+        val ops = root.optJSONArray("ops")
+            ?: return 400 to JSONObject().put("error", "需要 ops 数组")
+        if (ops.length() == 0) return 400 to JSONObject().put("error", "ops 为空")
+        if (ops.length() > 200) {
+            return 400 to JSONObject().put("error", "一次最多 200 条操作（收到 ${ops.length()}）")
+        }
+
+        val p = session.project
+        // ---- 第一遍：只校验，不写入 ----
+        val validated = ArrayList<JSONObject>(ops.length())
+        for (i in 0 until ops.length()) {
+            val op = ops.optJSONObject(i)
+                ?: return 400 to JSONObject().put("error", "ops[$i] 不是对象")
+            val type = op.optString("type", "")
+            val err = validateOp(type, op, p)
+            if (err != null) {
+                return 400 to JSONObject()
+                    .put("error", "第 ${i + 1} 条操作（$type）不合法：$err")
+                    .put("opIndex", i)
+            }
+            validated.add(op)
+        }
+
+        // ---- 第二遍：在主线程原子应用 ----
+        val applied = ArrayList<JSONObject>(validated.size)
+        val ok = onMainThread(12000) {
+            session.rememberSnapshot(root.optString("label", "AI 批量编辑"))
+            for ((i, op) in validated.withIndex()) {
+                val r = applyOp(op, p)
+                applied.add(r.put("index", i))
+            }
+            session.pushAll()
+            session.scheduleAutoSave()
+            true
+        }
+        if (ok != true) return 503 to JSONObject().put("error", "应用繁忙，批量操作未提交")
+
+        bumpRevision()
+        broadcast("batch", JSONObject().put("ops", applied.size).put("revision", revision))
+        session.notifyExternalEdit("AI 批量编辑 ${applied.size} 项")
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("revision", revision)
+            .put("applied", applied.size)
+            .put("results", JSONArray(applied))
+            .put("undoable", true)
+    }
+
+    /** 校验单条操作；返回 null 表示合法。字段检查在这里集中做。 */
+    private fun validateOp(type: String, op: JSONObject, p: Project): String? {
+        fun needPattern(id: Int): String? =
+            if (p.patternById(id) == null) "样式 id=$id 不存在" else null
+        fun needTrack(i: Int): String? =
+            if (i !in p.tracks.indices) "轨道 $i 越界（共 ${p.tracks.size} 条）" else null
+        return when (type) {
+            "pattern.edit", "notes.add", "notes.remove", "notes.transform" -> {
+                needPattern(op.optInt("patternId", -1))
+                    ?: needTrack(op.optInt("track", -1))
+                    ?: if (type != "notes.remove" && op.optJSONArray("notes") == null &&
+                        type != "notes.transform") "需要 notes 数组" else null
+            }
+            "pattern.create" -> {
+                val name = op.optString("name", "").trim()
+                when {
+                    name.isEmpty() -> "需要 name"
+                    op.optInt("bars", 2) !in 1..64 -> "bars 必须在 1..64"
+                    p.patterns.size >= 256 -> "样式数量已达上限"
+                    else -> null
+                }
+            }
+            "pattern.patch" -> needPattern(op.optInt("id", -1))
+            "pattern.delete" -> needPattern(op.optInt("id", -1))
+            "clips.add", "clips.arrange" -> {
+                val arr = if (type == "clips.arrange") op.optJSONArray("clips")
+                else JSONArray().put(op)
+                if (arr == null) "需要 clips 数组"
+                else {
+                    var e: String? = null
+                    for (i in 0 until arr.length()) {
+                        val c = arr.optJSONObject(i) ?: continue
+                        val patId = c.optInt("patternId", -1)
+                        val trk = c.optInt("track", 0)
+                        val start = c.optInt("startTicks", c.optInt("start", 0))
+                        val len = c.optInt("lengthTicks", c.optInt("length", p.barTicks))
+                        e = when {
+                            p.patternById(patId) == null -> "patternId $patId 不存在"
+                            trk !in p.tracks.indices -> "track $trk 越界"
+                            start < 0 -> "start 不能为负"
+                            len < Note.STEP -> "length 至少 ${Note.STEP} tick"
+                            else -> null
+                        }
+                        if (e != null) break
+                    }
+                    e
+                }
+            }
+            "clips.patch" -> {
+                val id = op.optInt("id", -1)
+                if (p.clips.none { it.id == id }) "片段 id=$id 不存在" else null
+            }
+            "clips.delete" -> {
+                val id = op.optInt("id", -1)
+                if (p.clips.none { it.id == id }) "片段 id=$id 不存在" else null
+            }
+            "automation.upsert" -> {
+                needTrack(op.optInt("track", -1))
+                    ?: runCatching { Automation.Target.valueOf(op.optString("target", "VOLUME")) }
+                        .exceptionOrNull()?.let { "未知自动化目标 ${op.optString("target")}" }
+                    ?: if (op.optJSONArray("points") == null) "需要 points 数组" else null
+            }
+            "automation.delete" -> {
+                val target = op.optString("target", "VOLUME")
+                when {
+                    op.optInt("track", -1) !in p.tracks.indices -> "轨道越界"
+                    runCatching { Automation.Target.valueOf(target) }.isFailure ->
+                        "未知自动化目标 $target"
+                    else -> null
+                }
+            }
+            "tracks.patch" -> needTrack(op.optInt("index", -1))
+            "tracks.add" -> {
+                val inst = op.optString("inst", "SYNTH").uppercase()
+                when {
+                    runCatching { Instrument.valueOf(inst) }.isFailure -> "未知乐器 $inst"
+                    p.tracks.size >= 64 -> "轨道数量已达上限"
+                    else -> null
+                }
+            }
+            "tracks.reorder" -> {
+                val order = op.optJSONArray("order") ?: return "需要 order 数组"
+                val idx = (0 until order.length()).map { order.optInt(it, -1) }
+                if (idx.size != p.tracks.size || idx.toSet() != p.tracks.indices.toSet())
+                    "order 必须恰好包含所有轨道下标各一次" else null
+            }
+            "transport" -> {
+                val bpm = op.optDouble("bpm", Double.NaN)
+                if (!bpm.isNaN() && bpm !in 20.0..300.0) "bpm 必须在 20..300" else null
+            }
+            else -> "不认识的操作类型 $type"
+        }
+    }
+
+    /** 应用一条已校验的操作，返回可读结果。 */
+    private fun applyOp(op: JSONObject, p: Project): JSONObject {
+        val type = op.getString("type")
+        // 复用既有编辑逻辑，保证批量与单条接口行为一致。
+        when (type) {
+            "pattern.edit" -> return handlePatternEdit(op.toString()).second
+            "notes.add" -> return handleNotesAdd(op.toString()).second
+            "notes.remove" -> return handleNotesRemove(op.toString()).second
+            "notes.transform" -> return handleNotesTransform(op.toString()).second
+            "pattern.create" -> {
+                val pat = p.newPattern().apply {
+                    name = op.optString("name", "样式 ${p.patterns.size}")
+                    bars = op.optInt("bars", 2).coerceIn(1, 64)
+                }
+                return JSONObject().put("ok", true).put("id", pat.id).put("name", pat.name)
+            }
+            "pattern.patch" -> {
+                val pat = p.patternById(op.optInt("id"))!!
+                if (op.has("name")) pat.name = op.optString("name", pat.name)
+                if (op.has("bars")) pat.bars = op.optInt("bars", pat.bars).coerceIn(1, 64)
+                return JSONObject().put("ok", true).put("id", pat.id)
+            }
+            "pattern.delete" -> {
+                val id = op.optInt("id")
+                p.patterns.removeAll { it.id == id }
+                p.clips.removeAll { it.patternId == id }
+                if (p.currentPattern !in p.patterns.indices) p.currentPattern = 0
+                return JSONObject().put("ok", true).put("deleted", id)
+            }
+            "clips.add", "clips.arrange" -> {
+                val arr = if (type == "clips.arrange") op.getJSONArray("clips")
+                else JSONArray().put(op)
+                val ids = JSONArray()
+                for (i in 0 until arr.length()) {
+                    val c = arr.getJSONObject(i)
+                    val clip = Clip(
+                        id = p.nextClipId++,
+                        patternId = c.optInt("patternId"),
+                        track = c.optInt("track"),
+                        start = c.optInt("startTicks", c.optInt("start", 0)),
+                        length = c.optInt("lengthTicks", c.optInt("length", p.barTicks)),
+                        offset = c.optInt("offsetTicks", c.optInt("offset", 0)),
+                        label = c.optString("label", "")
+                    )
+                    p.clips.add(clip)
+                    ids.put(clip.id)
+                }
+                return JSONObject().put("ok", true).put("ids", ids)
+            }
+            "clips.patch" -> {
+                val id = op.optInt("id")
+                val c = p.clips.first { it.id == id }
+                if (op.has("patternId")) c.patternId = op.optInt("patternId", c.patternId)
+                if (op.has("track")) c.track = op.optInt("track", c.track)
+                if (op.has("startTicks")) c.start = op.optInt("startTicks", c.start)
+                if (op.has("lengthTicks")) c.length = op.optInt("lengthTicks", c.length)
+                if (op.has("offsetTicks")) c.offset = op.optInt("offsetTicks", c.offset)
+                if (op.has("label")) c.label = op.optString("label", c.label)
+                return JSONObject().put("ok", true).put("id", c.id)
+            }
+            "clips.delete" -> {
+                val id = op.optInt("id")
+                p.clips.removeAll { it.id == id }
+                return JSONObject().put("ok", true).put("deleted", id)
+            }
+            "automation.upsert" -> {
+                val track = op.optInt("track")
+                val target = Automation.Target.valueOf(op.getString("target"))
+                val auto = p.automationOrCreate(track, target)
+                val pts = op.getJSONArray("points")
+                auto.points.clear()
+                for (i in 0 until pts.length()) {
+                    val pt = pts.optJSONObject(i) ?: continue
+                    val tick = if (pt.has("bar"))
+                        (pt.optDouble("bar") * p.barTicks).toInt()
+                    else pt.optInt("tick", 0)
+                    auto.addPoint(tick.coerceAtLeast(0), pt.optDouble("value", 0.5).toFloat())
+                }
+                return JSONObject().put("ok", true).put("points", auto.points.size)
+            }
+            "automation.delete" -> {
+                val track = op.optInt("track")
+                val target = Automation.Target.valueOf(op.getString("target"))
+                val before = p.automations.size
+                p.automations.removeAll { it.track == track && it.target == target }
+                return JSONObject().put("ok", true)
+                    .put("removed", before - p.automations.size)
+            }
+            "tracks.add" -> {
+                val inst = Instrument.valueOf(op.getString("inst").uppercase())
+                val idx = p.addTrack(inst, op.optString("name", inst.cn))
+                val t = p.trackAt(idx)!!
+                if (op.has("group")) t.group = op.optString("group", "")
+                if (op.has("volume")) t.volume = op.optDouble("volume", 0.8).toFloat().coerceIn(0f, 1.5f)
+                if (op.has("pan")) t.pan = op.optDouble("pan", 0.0).toFloat().coerceIn(-1f, 1f)
+                return JSONObject().put("ok", true).put("index", idx)
+            }
+            "tracks.patch" -> {
+                val index = op.optInt("index")
+                val t = p.trackAt(index)!!
+                if (op.has("name")) t.name = op.optString("name", t.name)
+                if (op.has("volume")) t.volume = op.optDouble("volume", t.volume.toDouble()).toFloat().coerceIn(0f, 1.5f)
+                if (op.has("pan")) t.pan = op.optDouble("pan", t.pan.toDouble()).toFloat().coerceIn(-1f, 1f)
+                if (op.has("mute")) t.mute = op.optBoolean("mute", t.mute)
+                if (op.has("solo")) t.solo = op.optBoolean("solo", t.solo)
+                if (op.has("group")) t.group = op.optString("group", t.group)
+                if (op.has("sendReverb")) t.sendReverb = op.optDouble("sendReverb").toFloat().coerceIn(0f, 1f)
+                if (op.has("sendDelay")) t.sendDelay = op.optDouble("sendDelay").toFloat().coerceIn(0f, 1f)
+                if (op.has("transpose")) t.transpose = op.optInt("transpose", t.transpose).coerceIn(-48, 48)
+                return JSONObject().put("ok", true).put("index", index)
+            }
+            "tracks.reorder" -> {
+                val order = op.getJSONArray("order")
+                val idx = (0 until order.length()).map { order.getInt(it) }
+                val oldPatterns = p.patterns.map { pg -> pg.tracks.toMap() }
+                // 轨道顺序换了，音符与片段的下标必须同步重映射，否则内容会错位。
+                val newTracks = idx.map { p.tracks[it] }
+                val remap = HashMap<Int, Int>()
+                idx.forEachIndexed { newNode, oldNode -> remap[oldNode] = newNode }
+                p.tracks.clear()
+                p.tracks.addAll(newTracks)
+                p.patterns.forEachIndexed { pi, pg ->
+                    val old = oldPatterns[pi]
+                    pg.tracks.clear()
+                    old.forEach { (oldIdx, notes) -> pg.tracks[remap[oldIdx] ?: oldIdx] = notes }
+                }
+                p.clips.forEach { c -> c.track = remap[c.track] ?: c.track }
+                p.automations.forEach { a -> a.track = remap[a.track] ?: a.track }
+                p.selectedTrack = remap[p.selectedTrack] ?: 0
+                return JSONObject().put("ok", true).put("tracks", p.tracks.size)
+            }
+            "transport" -> {
+                if (op.has("bpm")) {
+                    p.bpm = op.optDouble("bpm", p.bpm.toDouble()).toFloat().coerceIn(20f, 300f)
+                }
+                if (op.has("swing")) p.swing = op.optDouble("swing", p.swing.toDouble()).toFloat().coerceIn(0f, 1f)
+                if (op.has("loopOn")) {
+                    p.loopOn = op.optBoolean("loopOn", p.loopOn)
+                    if (op.has("loopStart")) p.loopStart = op.optInt("loopStart", p.loopStart).coerceAtLeast(0)
+                    if (op.has("loopEnd")) p.loopEnd = op.optInt("loopEnd", p.loopEnd).coerceAtLeast(p.loopStart + Note.STEP)
+                }
+                return JSONObject().put("ok", true).put("bpm", p.bpm.toDouble())
+            }
+        }
+        return JSONObject().put("ok", true).put("type", type)
+    }
+
+    /** 片段列表（含 pattern 与轨道信息，AI 不必再拼两次请求）。 */
+    private fun clipsJson(): JSONObject = JSONObject()
+        .put("ok", true)
+        .put("barTicks", session.project.barTicks)
+        .put("clips", JSONArray().apply {
+            session.project.clips.sortedBy { it.start }.forEach { c ->
+                put(JSONObject()
+                    .put("id", c.id)
+                    .put("patternId", c.patternId)
+                    .put("patternName", session.project.patternById(c.patternId)?.name ?: "")
+                    .put("track", c.track)
+                    .put("startTicks", c.start)
+                    .put("lengthTicks", c.length)
+                    .put("offsetTicks", c.offset)
+                    .put("label", c.label))
+            }
+        })
+
+    /** 单独的结构接口：AI 一次排好整首歌的片段。 */
+    private fun handleArrangeClips(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        if (!o.has("clips")) return 400 to JSONObject().put("error", "需要 clips 数组")
+        val err = validateOp("clips.arrange", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        var res: JSONObject? = null
+        val ok = runOnMain {
+            session.rememberSnapshot("AI 排列片段")
+            res = applyOp(o.put("type", "clips.arrange"), session.project)
+            session.pushAll()
+            session.scheduleAutoSave()
+        }
+        if (!ok) return 503 to JSONObject().put("error", "应用繁忙")
+        bumpRevision()
+        session.notifyExternalEdit("AI 排列片段")
+        return 200 to (res ?: JSONObject()).put("revision", revision)
+    }
+
+    private fun handlePatchClip(id: Int?, body: String): Pair<Int, JSONObject> {
+        if (id == null) return 400 to JSONObject().put("error", "片段 id 不合法")
+        val o = JSONObject(body).put("id", id).put("type", "clips.patch")
+        val err = validateOp("clips.patch", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 修改片段")
+    }
+
+    private fun handleUpsertAutomation(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body).put("type", "automation.upsert")
+        val err = validateOp(o.getString("type"), o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 写入自动化")
+    }
+
+    private fun handleDeleteAutomation(path: String, query: Map<String, String>): Pair<Int, JSONObject> {
+        val o = JSONObject()
+            .put("type", "automation.delete")
+            .put("track", query["track"]?.toIntOrNull() ?: -1)
+            .put("target", query["target"] ?: "VOLUME")
+        val err = validateOp("automation.delete", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 删除自动化")
+    }
+
+    private fun handleCreatePattern(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body).put("type", "pattern.create")
+        val err = validateOp("pattern.create", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 新建样式")
+    }
+
+    private fun handlePatchPattern(id: Int?, body: String): Pair<Int, JSONObject> {
+        if (id == null) return 400 to JSONObject().put("error", "样式 id 不合法")
+        val o = JSONObject(body).put("id", id).put("type", "pattern.patch")
+        val err = validateOp("pattern.patch", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 修改样式")
+    }
+
+    private fun handleDeletePattern(id: Int?): Pair<Int, JSONObject> {
+        if (id == null) return 400 to JSONObject().put("error", "样式 id 不合法")
+        val o = JSONObject().put("id", id).put("type", "pattern.delete")
+        val err = validateOp("pattern.delete", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 删除样式")
+    }
+
+    private fun handleReorderTracks(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body).put("type", "tracks.reorder")
+        val err = validateOp("tracks.reorder", o, session.project)
+        if (err != null) return 400 to JSONObject().put("error", err)
+        return applyOpAndPush(o, "AI 重排轨道")
+    }
+
+    /** 撤销最近一次外部写入。用户在软件里误删也能靠它救回来。 */
+    private fun handleUndo(): Pair<Int, JSONObject> {
+        var done = false
+        val label = session.undoLabel()
+        runOnMain {
+            done = session.undoExternalEdit()
+            if (done) session.scheduleAutoSave()
+        }
+        if (!done) return 409 to JSONObject().put("error", "没有可撤销的 AI 编辑")
+        bumpRevision()
+        broadcast("undo", JSONObject().put("label", label))
+        session.notifyExternalEdit("已撤销：$label")
+        return 200 to JSONObject().put("ok", true).put("undone", label).put("revision", revision)
+    }
+
+    /** 让手机界面跟着 AI 的编辑走：选中轨道、跳到某处、打开某个页签。 */
+    private fun handleSelection(body: String): Pair<Int, JSONObject> {
+        val o = if (body.isBlank()) JSONObject() else JSONObject(body)
+        var result = JSONObject()
+        val ok = runOnMain {
+            val p = session.project
+            if (o.has("track")) {
+                val t = o.optInt("track")
+                if (t in p.tracks.indices) p.selectedTrack = t
+            }
+            if (o.has("patternId")) {
+                val idx = p.patterns.indexOfFirst { it.id == o.optInt("patternId") }
+                if (idx >= 0) p.currentPattern = idx
+            }
+            if (o.has("seekTicks")) session.seek(o.optInt("seekTicks"))
+            if (o.has("loopOn")) {
+                session.setLoop(
+                    o.optBoolean("loopOn"),
+                    o.optInt("loopStart", p.loopStart),
+                    o.optInt("loopEnd", p.loopEnd)
+                )
+            }
+            result = JSONObject()
+                .put("selectedTrack", p.selectedTrack)
+                .put("currentPattern", p.currentPattern)
+            session.notifyExternalEdit("AI 切换视图")
+        }
+        if (ok != true) return 503 to JSONObject().put("error", "应用繁忙")
+        return 200 to result.put("ok", true)
+    }
+
+    /** 应用一条操作并推送引擎，返回 HTTP 结果。 */
+    private fun applyOpAndPush(op: JSONObject, label: String): Pair<Int, JSONObject> {
+        var result: JSONObject? = null
+        val ok = runOnMain {
+            session.rememberSnapshot(label)
+            result = applyOp(op, session.project)
+            session.pushAll()
+            session.scheduleAutoSave()
+        }
+        if (!ok) return 503 to JSONObject().put("error", "应用繁忙")
+        bumpRevision()
+        session.notifyExternalEdit(label)
+        return 200 to (result ?: JSONObject()).put("revision", revision).put("undoable", true)
+    }
 }
+
+

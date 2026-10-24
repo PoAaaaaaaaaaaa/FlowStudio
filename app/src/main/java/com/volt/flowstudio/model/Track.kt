@@ -15,12 +15,14 @@ data class Track(
     var solo: Boolean = false,
     var transpose: Int = 0,
     var velocitySense: Float = 0.7f,
+    /** 编组/风格标记，便于 AI 与界面按层管理（如 "drums"、"pad"）。 */
+    var group: String = "",
     var params: FloatArray = FloatArray(12) { 0.5f },
     val effects: MutableList<Effect> = MutableList(4) { Effect.empty() }
 ) {
     fun copyTrack(): Track = Track(
         name, instrument, volume, pan, sendReverb, sendDelay, mute, solo,
-        transpose, velocitySense, params.copyOf(),
+        transpose, velocitySense, group, params.copyOf(),
         effects.map { it.copyEffect() }.toMutableList()
     )
 
@@ -49,6 +51,7 @@ data class Track(
         put("solo", solo)
         put("transpose", transpose)
         put("velSense", velocitySense.toDouble())
+        put("group", group)
         put("params", JSONArray(params.map { it.toDouble() }))
         put("inserts", JSONArray().apply { effects.forEach { put(it.toJson()) } })
     }
@@ -78,6 +81,7 @@ data class Track(
                 solo = o.optBoolean("solo", false),
                 transpose = o.optInt("transpose", 0),
                 velocitySense = o.optDouble("velSense", 0.7).toFloat(),
+                group = o.optString("group", ""),
                 params = p,
                 effects = fx
             )
@@ -116,3 +120,4 @@ data class Track(
         }
     }
 }
+

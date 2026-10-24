@@ -12,8 +12,8 @@ android {
         applicationId = "com.volt.flowstudio"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.13"
+        versionCode = 15
+        versionName = "1.14"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -94,3 +94,4 @@ dependencies {
     // 这样 APK 只有一个 so + 一份 dex，启动最快，也没有供应链风险。
     implementation(kotlin("stdlib"))
 }
+

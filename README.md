@@ -14,6 +14,20 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.14 更新
+
+- 新增本地桥接协议 v2：`/capabilities` 让插件按实际能力调用，不再按版本号猜。
+- 新增 `/batch` 原子批量接口：一次提交最多 200 条编辑，任一条非法就整批拒绝。
+- 新增片段结构接口：`/clips`、`/clips/arrange`、`/clips/{id}`，AI 可一次排好整首歌。
+- 新增样式管理（创建/改名/改长/删除）、轨道重排、自动化写入与删除。
+- 新增 `/undo`：AI 每次写入前自动留快照，手机上可一键撤销。
+- 新增 `/selection`：AI 改完后可以把界面切到对应轨道、样式或位置。
+- 插件写入后手机界面立即刷新，并在底部显示"AI 已…· 点此撤销"。
+- 轨道增加 `group` 编组标记；工程增加调性/音阶提示与可配置拍号字段。
+- 新增 11 种曲风起步（House/Techno/Trap/Lo-fi/Rock/Metal/Jazz/Reggae/Latin/Ambient/Pop），
+  一次追加对应编制、鼓型、和声与骨架样式，不覆盖现有内容。
+- 曲风鼓型从 6 种扩到 13 种（新增 rock/metal/jazz/reggae/latin/afrobeat/trap/drumAndBass）。
+
 ## 1.13 更新
 
 - 界面统一为石墨黑与琥珀主色，所有页面加入卡片层级、渐变背景和按压反馈。

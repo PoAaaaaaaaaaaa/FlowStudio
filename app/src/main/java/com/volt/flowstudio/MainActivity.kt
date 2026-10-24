@@ -36,6 +36,8 @@ class MainActivity : Activity() {
     private lateinit var keys: KeyboardView
     private lateinit var rack: ChannelRackView
     private lateinit var banner: android.widget.TextView
+    private var aiBanner: FlowButton? = null
+    private var currentDialog: android.app.Dialog? = null
 
     private var currentTab = 0    // 机架 / 步进 / 卷帘 / 编排 / 混音 / 自动化
     private var chromeTop = 0
@@ -403,6 +405,45 @@ class MainActivity : Activity() {
         // 自动保存保持安静，只有手动保存显示结果。
         session.onSaved = { ok -> if (!ok) toast("自动保存失败，请立即手动保存") }
         session.onLoaded = { p -> refreshAll(p) }
+        // AI/插件写入后立刻刷新当前页面，并在底部显示可撤销提示。
+        session.onExternalEdit = { label ->
+            refreshAll(session.project)
+            showAiEditBar(label)
+        }
+    }
+
+    /** 外部编辑提示条：明确告诉用户谁改了什么，并提供一键撤销。 */
+    private fun showAiEditBar(label: String) {
+        aiBanner?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+        val bar = FlowButton(this).apply {
+            text = "AI 已${label} · 点此撤销"
+            textSize = 10f
+            gravity = android.view.Gravity.CENTER
+            buttonColor = Palette.withAlpha(Palette.CYAN, 60)
+            foregroundColor = Palette.TEXT
+            setOnClickListener {
+                val ok = session.undoExternalEdit()
+                toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的改动")
+                refreshAll(session.project)
+                (parent as? android.view.ViewGroup)?.removeView(this)
+            }
+        }
+        aiBanner = bar
+        val root = (content.parent as? FrameLayout) ?: return
+        root.addView(bar, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, dp(36)
+        ).apply {
+            gravity = android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL
+            bottomMargin = chromeBottom + dp(8)
+            leftMargin = dp(12)
+            rightMargin = dp(12)
+        })
+        ui.postDelayed({
+            if (aiBanner === bar) {
+                (bar.parent as? android.view.ViewGroup)?.removeView(bar)
+                if (aiBanner === bar) aiBanner = null
+            }
+        }, 12_000)
     }
 
     private fun refreshAll(p: Project) {
@@ -558,8 +599,37 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun showGenrePicker() {
+        val picker = GenrePicker(this) { bp ->
+            val before = session.project.tracks.size
+            val added = GenreStarter.apply(session.project, bp)
+            if (added <= 0) {
+                toast("这个曲风没有可用的骨架")
+                return@GenrePicker
+            }
+            session.pushAll()
+            session.scheduleAutoSave()
+            refreshAll(session.project)
+            toast("已追加 ${bp.name} 骨架：${session.project.tracks.size - before} 条新轨道")
+            currentDialog?.dismiss()
+        }
+        currentDialog = android.app.Dialog(this).apply {
+            setContentView(android.widget.ScrollView(this@MainActivity).apply {
+                addView(picker)
+            })
+            setCanceledOnTouchOutside(true)
+            window?.setBackgroundDrawable(panelBackground(this@MainActivity))
+            setOnDismissListener { currentDialog = null }
+            show()
+            window?.setLayout(
+                (resources.displayMetrics.widthPixels * 0.7f).toInt(),
+                (resources.displayMetrics.heightPixels * 0.82f).toInt()
+            )
+        }
+    }
+
     private fun showMoreDialog() {
-        val items = arrayOf("保存工程", "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}", "摇摆 / Swing", "操作指南")
+        val items = arrayOf("保存工程", "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}", "摇摆 / Swing", "按曲风起步…", "操作指南", "撤销 AI 最近一次编辑")
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("更多控制")
             .setItems(items) { _, which ->
@@ -567,7 +637,13 @@ class MainActivity : Activity() {
                     0 -> transportBar.onSave?.invoke()
                     1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
                     2 -> showSwingDialog()
-                    3 -> showGestureGuide()
+                    3 -> showGenrePicker()
+                    4 -> showGestureGuide()
+                    5 -> {
+                        val ok = session.undoExternalEdit()
+                        toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
+                        refreshAll(session.project)
+                    }
                 }
             }
             .setNegativeButton("关闭", null)
