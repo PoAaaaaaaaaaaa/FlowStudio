@@ -226,7 +226,6 @@ class MixerView @JvmOverloads constructor(
         val h = height.toFloat()
         val faderTop = dp(46f)
         val faderBottom = h - dp(58f)
-        val available = w - masterW
 
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {

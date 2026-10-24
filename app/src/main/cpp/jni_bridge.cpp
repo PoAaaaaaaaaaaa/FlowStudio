@@ -27,16 +27,6 @@ void throwIllegal(JNIEnv* env, const char* msg) {
     if (cls) env->ThrowNew(cls, msg);
 }
 
-int32_t effectTypeOf(JNIEnv* env, jobject jfx) {
-    if (!jfx) return 0;
-    jclass cls = env->GetObjectClass(jfx);
-    jfieldID fid = env->GetFieldID(cls, "typeOrdinal", "I");
-    if (!fid) { env->ExceptionClear(); env->DeleteLocalRef(cls); return 0; }
-    const int32_t v = env->GetIntField(jfx, fid);
-    env->DeleteLocalRef(cls);
-    return v;
-}
-
 }  // namespace
 
 extern "C" {

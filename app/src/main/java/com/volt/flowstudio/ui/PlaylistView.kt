@@ -203,7 +203,6 @@ class PlaylistView @JvmOverloads constructor(
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val p = project ?: return false
-        val w = width.toFloat()
 
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -250,7 +249,6 @@ class PlaylistView @JvmOverloads constructor(
                     origStart = clip.start
                     origLen = clip.length
                     origTrack = clip.track
-                    val rightEdge = tickToX(clip.end)
                     drag = if (tickToX(clip.end) - e.x < dp(16f)) Drag.RESIZE_R else Drag.MOVE
                     onSelectTrack?.invoke(row)
                     onClipTapped?.invoke(clip)

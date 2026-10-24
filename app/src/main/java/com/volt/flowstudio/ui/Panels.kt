@@ -23,8 +23,8 @@ class SoundPanel(
     private val onChanged: () -> Unit
 ) : LinearLayout(context) {
 
-    private lateinit var instRow: LinearLayout
-    private lateinit var paramRow: LinearLayout
+    private var instRow: LinearLayout = LinearLayout(context)
+    private var paramRow: LinearLayout = LinearLayout(context)
 
     init {
         orientation = VERTICAL

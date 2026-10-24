@@ -10,7 +10,7 @@ API=26
 ABI=aarch64-linux-android
 OUT="$ROOT/build"
 OBJ="$OUT/obj"
-LIB="$ROOT/app/src/main/jniLibs/arm64-v8a"
+LIB="$ROOT/build/jniLibs/arm64-v8a"
 
 SRC=(
   "$ROOT/engine/src/voice.cpp"

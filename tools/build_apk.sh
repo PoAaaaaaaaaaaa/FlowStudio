@@ -17,7 +17,7 @@ VERSION_CODE="${VERSION_CODE:-1}"
 
 echo "== 0. 原生库 =="
 "$ROOT/tools/build_native.sh"
-SO="$ROOT/app/src/main/jniLibs/arm64-v8a/libflowengine.so"
+SO="$ROOT/build/jniLibs/arm64-v8a/libflowengine.so"
 
 echo "== 1. 资源编译 =="
 rm -rf "$OUT/gen" "$OUT/res" "$OUT/classes" "$OUT/dex" "$OUT/final"

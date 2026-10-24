@@ -16,3 +16,4 @@ Thumbs.db
 *.log
 engine/build-host/
 tools/debug.keystore
+app/src/main/jniLibs/

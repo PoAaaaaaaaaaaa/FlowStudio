@@ -78,7 +78,6 @@ class PianoRollView @JvmOverloads constructor(
         val rowH = keyHeight
         val rows = ((gridB) / rowH).toInt().coerceAtLeast(1)
 
-        val ticksVisible = ((gridR - gridL) / pixelsPerTick()).coerceAtLeast(1f)
 
         // ---- 背景行（黑白键）----
         for (r in 0 until rows) {
@@ -355,9 +354,7 @@ class PianoRollView @JvmOverloads constructor(
 
             MotionEvent.ACTION_MOVE -> {
                 val ppt = pixelsPerTick()
-                val dxTicks = ((e.x - dragLastX) / ppt).toInt()
                 val rowH = keyHeight
-                val dRows = ((e.y - dragLastY) / rowH).toInt()
                 val n = activeNote
 
                 when (mode) {
