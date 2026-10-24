@@ -73,6 +73,27 @@ class StudioBridge(
 
     fun bumpRevision() { revision++ }
 
+    // ---- 事件缓冲：给长轮询用 ----
+    // SSE 之外的第二条路。长轮询就是普通 HTTP：
+    // 客户端带 since=N 来问"有没有 N 之后的事件"，服务端最多等 20 秒，
+    // 一有事件立刻返回。它不需要处理 socket 生命周期，天然可靠。
+    private val eventLog = java.util.concurrent.ConcurrentLinkedDeque<JSONObject>()
+    @Volatile
+    private var eventSeq: Long = 0L
+
+    private fun recordEvent(type: String, data: JSONObject): JSONObject {
+        val ev = JSONObject()
+            .put("seq", ++eventSeq)
+            .put("type", type)
+            .put("revision", revision)
+            .put("time", System.currentTimeMillis())
+            .put("payload", data)
+        eventLog.addLast(ev)
+        // 只留最近 200 条，长时间运行不会涨内存
+        while (eventLog.size > 200) eventLog.pollFirst()
+        return ev
+    }
+
     // ---- 实时推送：SSE 订阅者 ----
     // 插件订阅 /events 后，软件里任何变化都会立刻推过去。
     // 轮询做不到"实时"，而且高频轮询会白白吃电。
@@ -80,6 +101,10 @@ class StudioBridge(
 
     /** 广播一条事件给所有订阅者 */
     fun broadcast(type: String, data: JSONObject) {
+        // 无论有没有 SSE 订阅者，事件都要进缓冲：
+        // 长轮询的客户端靠它拿增量。
+        recordEvent(type, data)
+
         if (subscribers.isEmpty()) {
             Log.d(TAG, "广播 $type：没有订阅者")
             return
@@ -235,12 +260,15 @@ class StudioBridge(
                     // ThreadPoolExecutor，直接 FATAL EXCEPTION: flow-bridge
                     // —— 整个应用被杀。一个断开的连接不该让用户丢掉正在编的曲。
                     pool.execute {
+                        var owned = true
                         try {
-                            handle(client)
+                            // handle 返回 false 表示"这条连接的生命周期不归我了"
+                            // （SSE 把它交给流线程了），外层不能再关。
+                            owned = !handle(client)
                         } catch (t: Throwable) {
                             Log.w(TAG, "处理连接时出错（已隔离）: ${t.javaClass.simpleName}: ${t.message}")
                         } finally {
-                            runCatching { client.close() }
+                            if (owned) runCatching { client.close() }
                         }
                     }
                 } catch (t: Throwable) {
@@ -260,7 +288,12 @@ class StudioBridge(
 
     // ---------------------------------------------------------------- 请求处理
 
-    private fun handle(client: Socket) {
+    /**
+     * 处理一个连接。
+     * @return true 表示这条连接的生命周期已经移交给 SSE 流线程，
+     *         调用方不能再关闭它；false 表示由调用方关闭。
+     */
+    private fun handle(client: Socket): Boolean {
         var s: Socket? = client
         try {
             s = client
@@ -269,9 +302,9 @@ class StudioBridge(
             client.soTimeout = 20000
 
             val input = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
-            val requestLine = input.readLine() ?: return
+            val requestLine = input.readLine() ?: return false
             val parts = requestLine.split(" ")
-            if (parts.size < 2) return
+            if (parts.size < 2) return false
             val method = parts[0].uppercase()
             val pathWithQuery = parts[1]
 
@@ -319,16 +352,18 @@ class StudioBridge(
                         runCatching { held.close() }
                     }
                 }
-                return
+                return true
             }
 
             respond(out, status, payload)
+            return false
         } catch (t: Throwable) {
             Log.e(TAG, "处理连接出错: ${t.javaClass.simpleName}: ${t.message}")
         } finally {
             // s 为 null 表示所有权已移交给 SSE 线程
             s?.let { runCatching { it.close() } }
         }
+        return false
     }
 
     private fun respond(out: OutputStream, status: Int, body: JSONObject) {
@@ -394,6 +429,26 @@ class StudioBridge(
         // SSE 长连接要单独处理：它不能走上面的"返回 JSON 立即结束"流程
         if (method == "GET" && path == "/events") {
             return -1 to JSONObject()   // 由 handle() 里的特殊分支接走
+        }
+
+        // ---- 长轮询：普通 HTTP，最可靠 ----
+        // since=N 表示"给我 N 之后的事件"。最多等 20 秒，
+        // 有事件立刻回，没事件就等到超时回一个空列表。
+        if (method == "GET" && path == "/poll") {
+            val since = query["since"]?.toLongOrNull() ?: 0L
+            val waitMs = (query["wait"]?.toLongOrNull() ?: 20000L).coerceIn(0L, 25000L)
+            val deadline = System.currentTimeMillis() + waitMs
+
+            var picked: List<JSONObject> = emptyList()
+            while (System.currentTimeMillis() < deadline) {
+                picked = eventLog.filter { it.optLong("seq", 0) > since }
+                if (picked.isNotEmpty()) break
+                Thread.sleep(50)
+            }
+            return 200 to JSONObject()
+                .put("ok", true)
+                .put("seq", eventSeq)
+                .put("events", JSONArray().apply { picked.forEach { put(it) } })
         }
 
         return try {

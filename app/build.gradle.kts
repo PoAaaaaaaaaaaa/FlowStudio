@@ -12,8 +12,8 @@ android {
         applicationId = "com.volt.flowstudio"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.11"
+        versionCode = 13
+        versionName = "1.12"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
