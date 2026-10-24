@@ -1,0 +1,94 @@
+# FlowStudio
+
+安卓上的移动端音乐工作站。自写的 C++17 实时音频引擎 + 全自绘 Kotlin 界面，零第三方依赖。
+
+APK 约 300 KB。装到 arm64 手机上直接能编曲。
+
+## 怎么跑
+
+```bash
+./tools/build_native.sh   # 交叉编译 C++ 引擎 -> libflowengine.so
+./tools/build_apk.sh      # Kotlin -> dex -> aapt2 -> zipalign -> apksigner
+adb install build/FlowStudio-1.0.0.apk
+```
+
+或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
+
+## 架构
+
+引擎和界面彻底分离，这是必须的：音频线程一次 GC 停顿就是一声爆音。
+
+```
+engine/                      纯 C++17，不依赖 Android，桌面上能直接跑单测
+  include/flow/dsp.h         PolyBLEP 振荡器 / TPT 状态变量滤波器 / 双二阶 EQ / 分数延迟线
+  include/flow/voice.h       发声单元（六种乐器）
+  include/flow/effect.h      10 类插入效果
+  include/flow/engine.h      调度、混音总线、母带、离线渲染
+  src/voice.cpp              合成内核
+  src/effect.cpp             效果器实现
+  src/engine.cpp             传输 / 自动化 / 总线
+  src/audio_android.cpp      AAudio 后端（低延迟路径，回调零分配）
+  src/audio_null.cpp         宿主占位后端
+  test/host_test.cpp         桌面自测，验证出声/音高/爆音/NaN/声像/导出长度
+
+app/src/main/java/com/volt/flowstudio/
+  audio/NativeEngine.kt      JNI 门面
+  model/                     工程 / 轨道 / 样式 / 音符 / 效果 / 自动化
+  session/StudioSession.kt   工程状态 -> 引擎调用，存盘读盘，导出 WAV
+  ui/                        全部自绘：步进器、钢琴卷帘、播放列表、混音台、自动化、键盘
+  MainActivity.kt            五个页签的主界面
+```
+
+## 引擎实测
+
+```
+$ ./engine/build-host/host_test
+
+[ ok ]  合成器 Synth：有声 peak=0.909 rms=0.1033
+[ ok ]  贝斯 Bass：有声 peak=0.380 rms=0.0475
+[ ok ]  鼓组 Kick：有声 peak=0.603 rms=0.0740
+[ ok ]  钟琴 Bell：有声 peak=0.686 rms=0.1463
+[ ok ]  电钢 EPiano：有声 peak=0.515 rms=0.0588
+[ ok ]  音高 A4：440Hz 能量 0.11130 远大于 880Hz 0.00000
+[ ok ]  多轨混音：peak=0.991 未超 1.0
+[ ok ]  效果 Reverb：输出有限 rms=0.3073
+[ ok ]  声像左：L=1.000 应大于 R=0.287
+[ ok ]  导出长度：4.00s（音乐 2s + 拖尾）
+
+全部通过  失败 0 项
+```
+
+## 功能
+
+**编排**
+- 步进器：16 分网格，拖动刷格子
+- 钢琴卷帘：画、拖、拉长、改力度、量化、框选删除
+- 播放列表：片段拖动、跨轨移动、拉长、循环区间
+- 样式（Pattern）制，跟 FL 一样解耦轨道与样式
+
+**音源**（全部实时合成，不含采样文件）
+- 3 振荡器减法合成器（PolyBLEP 抗混叠）
+- 减法贝斯
+- 鼓组：8 类打击，底鼓带音高下滑
+- FM 钟琴 / FM 电钢（带立体声颤音）
+- 采样器（WAV 导入）
+
+**效果**（每轨 4 个插入槽 + 2 条发送总线）
+滤波、节拍同步延迟、Freeverb 混响、合唱、失真、压缩、6 段均衡、降位、移相
+
+**混音**
+- 每轨：推子、等功率声像、静音、独奏、电平表
+- 母带：音量、前馈限幅、软削波、增益
+- 自动化：包络曲线，编辑所见即所得
+
+**其它**
+- 后台播放（前台服务）
+- 导出 16-bit 立体声 WAV，走系统分享
+- 工程存档 JSON，自动保存
+
+## 已知边界
+
+- 只打了 `arm64-v8a`。要给 x86_64 模拟器跑，改 `build.gradle.kts` 的 `abiFilters`。
+- 采样器只解 8/16/24/32-bit PCM 与 32-bit float 的 WAV。
+- 自动化曲线是线性插值，不是贝塞尔。
+- 录音（麦克风输入）留了权限和接口，尚未接线。

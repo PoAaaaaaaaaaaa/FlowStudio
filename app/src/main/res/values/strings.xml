@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlowStudio</string>
+    <string name="channel_name">播放中</string>
+    <string name="channel_desc">保持音频引擎在前台运行</string>
+</resources>

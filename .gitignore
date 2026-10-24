@@ -1,0 +1,18 @@
+# 构建产物
+build/
+app/build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# 本机签名私钥（绝不入库）
+tools/debug.keystore
+tools/*.keystore
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+*.log
+engine/build-host/
+tools/debug.keystore

@@ -1,0 +1,117 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: '版本名（例如 1.0.0）'
+        required: false
+        default: '1.0.0'
+
+env:
+  VERSION_NAME: ${{ github.event.inputs.version_name || '1.0.0' }}
+
+jobs:
+  build:
+    name: 构建 FlowStudio
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK 与构建工具
+        run: |
+          echo "y" | sdkmanager --install \
+            "ndk;26.3.11579264" \
+            "cmake;3.22.1" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: 配置 Gradle 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: C++ 引擎自测（桌面渲染管线）
+        run: |
+          # 引擎是纯 C++17，先在宿主机跑一遍离线渲染测试。
+          # 这一步失败就没必要往下打包了 —— 音色、混音、效果器都在这里验证。
+          g++ -std=c++17 -O2 -Iengine/include \
+            engine/src/voice.cpp engine/src/effect.cpp engine/src/engine.cpp \
+            engine/src/audio_null.cpp engine/test/host_test.cpp \
+            -o /tmp/engine_test
+          /tmp/engine_test
+
+      - name: 构建 Release APK
+        run: |
+          gradle :app:assembleRelease \
+            -PversionName="$VERSION_NAME" \
+            --no-daemon --stacktrace
+
+      - name: 构建 Debug APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: 校验产物
+        run: |
+          set -e
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "APK: $APK"
+          ls -la "$APK"
+          # 确认 so 真的打进去了，且架构正确
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libflowengine.so"
+          echo "libflowengine.so 已打包"
+          unzip -l "$APK" | grep -q "classes.dex"
+          echo "classes.dex 存在"
+          echo "APK_SIZE=$(stat -c%s "$APK")" >> $GITHUB_ENV
+
+      - name: 上传 Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowStudio-release-${{ env.VERSION_NAME }}
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: 上传 Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowStudio-debug
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+      - name: 写入构建摘要
+        run: |
+          {
+            echo "## FlowStudio 构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 版本 | $VERSION_NAME |"
+            echo "| APK 体积 | $((APK_SIZE / 1024 / 1024)) MB |"
+            echo "| 架构 | arm64-v8a |"
+            echo "| 引擎 | 自写 C++17 + AAudio |"
+          } >> $GITHUB_STEP_SUMMARY
