@@ -25,6 +25,13 @@ add_library(flowengine SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/jni_bridge.cpp"
 )
 
+# 汇编兜底文件同样需要这个开关：它自己的汇编里如果生成 tl;dr 之外的
+# 原子调用，一样会引用到没实现的符号。
+set_source_files_properties(
+    "${ENGINE_DIR}/src/atomic_shim.s"
+    PROPERTIES COMPILE_OPTIONS "-mno-outline-atomics"
+)
+
 target_include_directories(flowengine PRIVATE
     "${ENGINE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -47,6 +54,10 @@ target_compile_options(flowengine PRIVATE
 target_link_libraries(flowengine
     android
     aaudio
+    # OpenSL ES 是 AAudio 的后备后端。少了它，AAudio 打不开的那些设备
+    # 就彻底没有声音，而且链接期只在 CI 上暴露 —— 本地脚本单独链过一遍，
+    # CMake 这份漏了，两边不一致。
+    OpenSLES
     log
     m
 )
@@ -56,3 +67,20 @@ target_link_options(flowengine PRIVATE
     -Wl,--gc-sections
     -Wl,--exclude-libs,ALL
 )
+
+# 链接完立刻查：__aarch64_* 原子符号不能是未定义的。
+# 1.0.2 那次就是这个自检缺席 —— so 装得上，一 dlopen 就报
+#   cannot locate symbol "__aarch64_swp1_acq_rel"
+# 用 grep 查 readelf 输出，命中 UND 就构建失败。
+find_program(LLVM_READELF NAMES llvm-readelf)
+if(LLVM_READELF)
+    add_custom_command(TARGET flowengine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "== 检查原子符号 =="
+        COMMAND ${CMAKE_COMMAND}
+            -DSO=$<TARGET_FILE:flowengine>
+            -DREADELF=${LLVM_READELF}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_atomic.cmake"
+        VERBATIM
+        COMMENT "验证 libflowengine.so 没有未定义的原子符号"
+    )
+endif()
