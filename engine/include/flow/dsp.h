@@ -35,10 +35,36 @@ inline float fastTanh(float x) {
     return x * (27.f + x2) / (27.f + 9.f * x2);
 }
 
+/**
+ * 软削波。
+ *
+ * 旧实现 1.5x - 0.5x³ 是错的：它在 x=0.5 时输出 0.6875（放大 1.375 倍），
+ * 在 x=0.9 时输出 0.9855（仍然放大 1.095 倍）。这不是削波器，
+ * 是个增益器 —— 母带出来的东西永远顶在 0dBFS，听起来像一堵墙。
+ *
+ * 正确做法：
+ *   |x| <= 0.66 时保持线性（不动动态），
+ *   0.66 < |x| 时用三次曲线平滑压向 1.0，且在 0.66 处值与导数都连续。
+ *
+ * 这样大多数信号完全不受影响，只有真正接近满刻度的瞬态被柔和弯折。
+ */
 inline float softClip(float x) {
-    if (x > 1.f) return 1.f;
-    if (x < -1.f) return -1.f;
-    return 1.5f * x - 0.5f * x * x * x;
+    constexpr float k = 0.66f;
+    constexpr float k2 = k * k;
+    constexpr float k3 = k2 * k;
+    const float a = std::fabs(x);
+    if (a <= k) return x;   // 线性区，完全不动
+
+    // 三次过渡：在 x=k 处 f=k, f'=1；在 x=1 处 f=1, f'=0
+    // 解得 f(x) = k + (x-k) - (x-k)^2 / (2(1-k)) * c
+    // 参数化：在 x=k 处 f=k、f'=1；在 x=1 处 f=1、f'=0。
+    // 用二次型 f = k + d - d²/(2(1-k)) 满足这两个条件，
+    // 它在 x=1 正好到 1.0，不会像之前那样把峰值压掉 17%。
+    constexpr float denom = 1.f - k;      // 0.34
+    const float d = a - k;
+    float y = k + d - (d * d) / (2.f * denom);
+    if (y > 1.f) y = 1.f;
+    return x < 0.f ? -y : y;
 }
 
 inline float dbToGain(float db) { return std::pow(10.f, db / 20.f); }

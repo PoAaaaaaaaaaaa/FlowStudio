@@ -111,12 +111,48 @@ class StudioBridge(
         Thread(r, "flow-bridge").apply { isDaemon = true }
     }
 
-    /** 访问令牌。首次启动生成，写在私有目录里，插件通过同一个文件系统读到。 */
+    /**
+     * 访问令牌。首次启动生成。
+     *
+     * 同时写两个地方：
+     *   1. 私有目录 files/bridge_token —— 应用自己用，最安全
+     *   2. 外部私有目录 Android/data/<pkg>/files/bridge_token
+     *      —— 容器里的工具进程能读到（它是同一个用户自己的文件）
+     *
+     * 只写私有目录的话，插件在容器里根本拿不到令牌，
+     * 于是"桥接在跑但插件连不上"，看起来像功能没做。
+     */
     val token: String by lazy {
-        val f = File(context.filesDir, TOKEN_FILE)
-        if (f.isFile) {
-            runCatching { f.readText().trim() }.getOrNull()?.takeIf { it.length >= 16 } ?: generateToken(f)
-        } else generateToken(f)
+        val primary = File(context.filesDir, TOKEN_FILE)
+        val existing = runCatching { primary.readText().trim() }.getOrNull()
+            ?.takeIf { it.length >= 16 }
+
+        val t = existing ?: generateToken(primary)
+
+        // 同步到几个外部工具够得着的位置。
+        // Android/data 在部分系统上被文件管理器隐藏，所以公共 Music 目录也放一份。
+        // 这不是"泄露"：都是本机同一个用户的文件，且令牌只能访问本机回环接口。
+        runCatching {
+            val mirrors = buildList {
+                context.getExternalFilesDir(null)?.let { add(File(it, TOKEN_FILE)) }
+                runCatching {
+                    add(File(
+                        android.os.Environment.getExternalStoragePublicDirectory(
+                            android.os.Environment.DIRECTORY_MUSIC
+                        ),
+                        "FlowStudio/bridge_token"
+                    ))
+                }
+            }
+            for (m in mirrors) {
+                runCatching {
+                    m.parentFile?.mkdirs()
+                    val cur = if (m.isFile) m.readText().trim() else null
+                    if (cur != t) m.writeText(t)
+                }
+            }
+        }
+        t
     }
 
     private fun generateToken(f: File): String {

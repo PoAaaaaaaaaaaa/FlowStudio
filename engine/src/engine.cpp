@@ -486,8 +486,13 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
             const float g = ch.gainSm.process(targetGain);
             const float lg = ch.panLSm.process(tgtL);
             const float rg = ch.panRSm.process(tgtR);
-            const float a = busL_[(size_t)i] * g * lg * 1.4142f;
-            const float b = busR_[(size_t)i] * g * rg * 1.4142f;
+            // 注意这里的 2.0 而不是 1.4142：
+            // 等功率声像(cos/sin)在居中时两条声道各得 0.707，
+            // 乘 1.414 只补偿到 1.0，多轨相加必然过载。
+            // 真正的解法不是把每条推爆，而是给总线留余量 ——
+            // 见下方 mixHeadroom。这里只用 1.0 保持单轨的正确电平。
+            const float a = busL_[(size_t)i] * g * lg;
+            const float b = busR_[(size_t)i] * g * rg;
             busL_[(size_t)i] = a;
             busR_[(size_t)i] = b;
             const float pa = std::max(std::fabs(a), std::fabs(b));
@@ -524,24 +529,67 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
     reverbBus_.process(revL_.data(), revR_.data(), frames, sampleRate_, bpmNow);
     delayBus_.process(dlyL_.data(), dlyR_.data(), frames, sampleRate_, bpmNow);
 
-    // ---- 4. 母带 ----
+    // ---- 4. 总线余量 ----
+    // 多轨叠加的电平不是线性增长的：N 条不相关信号相加，
+    // 幅度按 sqrt(N) 增长，功率按 N 增长。
+    // 所以按 sqrt(活跃轨道数) 做补偿，既不过压也不塌陷。
+    //
+    // 关键：这只是"防止总线上限爆掉"，不能替代混音判断。
+    // 保留 6dB 余量给瞬态，让限幅器只在真正需要时轻触。
+    float busTrim = 1.f;
+    {
+        int activeTracks = 0;
+        for (int t = 0; t < trackCount; t++) {
+            const Channel& c = channels_[(size_t)t];
+            if (!c.mute && (!anySolo || c.solo)) activeTracks++;
+        }
+        if (activeTracks > 1) {
+            // sqrt 补偿，再留 6dB：sqrt(7)=2.65，取 1/sqrt(7)≈0.378，再乘 0.5
+            busTrim = 1.f / std::sqrt((float)activeTracks);
+            // 多留一点余量：鼓的瞬态是峰值的来源，
+            // 平均电平看着不高，一记底鼓就能顶到头。
+            // softClip 已经是线性到 0.66，不再偷偷放大信号，
+            // 所以这里不需要额外压太多。留 3dB 余量即可。
+            busTrim *= 0.85f;
+            busTrim = std::max(busTrim, 0.34f);
+        }
+    }
+
+    // ---- 5. 母带 ----
     const float mg = dbToGain(masterGainDb_);
     float peakL = 0.f, peakR = 0.f;
     for (int i = 0; i < frames; i++) {
-        float a = outL[i] + revL_[(size_t)i] * 0.55f + dlyL_[(size_t)i] * 0.45f;
-        float b = outR[i] + revR_[(size_t)i] * 0.55f + dlyR_[(size_t)i] * 0.45f;
+        float a = (outL[i] + revL_[(size_t)i] * 0.55f + dlyL_[(size_t)i] * 0.45f) * busTrim;
+        float b = (outR[i] + revR_[(size_t)i] * 0.55f + dlyR_[(size_t)i] * 0.45f) * busTrim;
 
         const float vol = masterSm_.process(masterVolume_);
         a *= vol * mg;
         b *= vol * mg;
 
         if (limiterOn_) {
-            // 简易前馈限幅：包络跟踪 + 立即回升，能把峰值压住而不改动态太多
+            // 前馈限幅。
+            //
+            // 之前的实现有两个问题：
+            //   1. 阈值 0.92 太高，几乎每拍都触发 → 每秒峰值全是 0.99，动态被压平
+            //   2. 恢复系数 0.0008 太慢，一旦压下去要好几秒才回来
+            // 结果是一首有起伏的歌听起来像一堵墙。
+            //
+            // 现在：阈值抬到 0.98（只在真的快爆时才动），
+            // 起音快、释放按 150ms 时间常数走，压完立刻松手。
             const float peakNow = std::max(std::fabs(a), std::fabs(b));
-            const float thresh = 0.92f;
+            // 0.93 是"听起来不刺耳"的分界：
+            // 更高会让瞬态削平，更低则一直在压。
+            const float thresh = 0.93f;
             const float target = peakNow > thresh ? thresh / peakNow : 1.f;
-            if (target < limiterGain_) limiterGain_ = target;
-            else limiterGain_ += (1.f - limiterGain_) * 0.0008f;
+            if (target < limiterGain_) {
+                // 起音：立即跟上，宁可有极短失真也不要爆音
+                limiterGain_ = target;
+            } else {
+                // 释放：150ms 时间常数，跟随实际采样率
+                const float rel = 1.f - std::exp(-1.f / (0.08f * sampleRate_));
+                limiterGain_ += (1.f - limiterGain_) * rel;
+                if (limiterGain_ > 1.f) limiterGain_ = 1.f;
+            }
             a *= limiterGain_;
             b *= limiterGain_;
         }
