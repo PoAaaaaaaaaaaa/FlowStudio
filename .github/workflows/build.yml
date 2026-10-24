@@ -13,6 +13,9 @@ on:
 
 env:
   VERSION_NAME: ${{ github.event.inputs.version_name || '1.0.0' }}
+  # ubuntu-latest 预装了 Android SDK，直接用；不走会坏的 setup-android action
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
 jobs:
   build:
@@ -30,40 +33,34 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 配置 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 安装 NDK 与构建工具
+      - name: 接受 SDK 许可
         run: |
-          echo "y" | sdkmanager --install \
-            "ndk;26.3.11579264" \
-            "cmake;3.22.1" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" > /dev/null
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          echo "许可已处理"
 
-      - name: 配置 Gradle 缓存
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+      - name: 安装 NDK 与 CMake
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" --install "ndk;26.3.11579264" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+          ls "$ANDROID_HOME/ndk"
 
       - name: 配置 Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: C++ 引擎自测（桌面渲染管线）
+      - name: C++ 引擎自测
         run: |
           # 引擎是纯 C++17，先在宿主机跑一遍离线渲染测试。
-          # 这一步失败就没必要往下打包了 —— 音色、混音、效果器都在这里验证。
+          # 音色、混音、效果器都在这步验证，挂了就没必要打包。
           g++ -std=c++17 -O2 -Iengine/include \
-            engine/src/voice.cpp engine/src/effect.cpp engine/src/engine.cpp \
-            engine/src/audio_null.cpp engine/test/host_test.cpp \
+            engine/src/voice.cpp \
+            engine/src/effect.cpp \
+            engine/src/engine.cpp \
+            engine/src/audio_null.cpp \
+            engine/test/host_test.cpp \
             -o /tmp/engine_test
           /tmp/engine_test
 
@@ -80,13 +77,12 @@ jobs:
         run: |
           set -e
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          [ -n "$APK" ] || { echo "没有生成 APK"; exit 1; }
           echo "APK: $APK"
           ls -la "$APK"
-          # 确认 so 真的打进去了，且架构正确
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libflowengine.so"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libflowengine.so" || { echo "缺少原生库"; exit 1; }
           echo "libflowengine.so 已打包"
-          unzip -l "$APK" | grep -q "classes.dex"
-          echo "classes.dex 存在"
+          unzip -l "$APK" | grep -q "classes.dex" || { echo "缺少 classes.dex"; exit 1; }
           echo "APK_SIZE=$(stat -c%s "$APK")" >> $GITHUB_ENV
 
       - name: 上传 Release APK
@@ -104,14 +100,15 @@ jobs:
           retention-days: 14
 
       - name: 写入构建摘要
+        if: always()
         run: |
           {
-            echo "## FlowStudio 构建完成"
+            echo "## FlowStudio 构建"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
             echo "| 版本 | $VERSION_NAME |"
-            echo "| APK 体积 | $((APK_SIZE / 1024 / 1024)) MB |"
+            echo "| APK 体积 | $(( ${APK_SIZE:-0} / 1024 / 1024 )) MB |"
             echo "| 架构 | arm64-v8a |"
             echo "| 引擎 | 自写 C++17 + AAudio |"
           } >> $GITHUB_STEP_SUMMARY
