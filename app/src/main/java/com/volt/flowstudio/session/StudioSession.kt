@@ -191,8 +191,12 @@ class StudioSession(private val context: Context) {
         }
     }
 
-    fun setMetronome(on: Boolean) {
-        if (engine.available) engine.setMetronome(on)
+    fun setMetronome(on: Boolean, volume: Float = project.metronomeVolume) {
+        project.metronomeVolume = volume.coerceIn(0f, 1f)
+        if (engine.available) {
+            engine.setMetronome(on)
+            engine.setMetronomeVolume(project.metronomeVolume)
+        }
     }
 
     // ---------------------------------------------------------------- 试听
@@ -305,8 +309,18 @@ class StudioSession(private val context: Context) {
         project = Project.demo()
     }
 
+    /**
+     * 用户改过东西的统一出口：几秒后自动落盘，并让桥接的 revision +1。
+     * 插件靠 revision 判断它手上的快照是否已经过期，
+     * 避免 AI 把用户刚手动调好的东西覆盖掉。
+     */
+    fun noteUserEdit() {
+        bridge?.bumpRevision()
+    }
+
     /** 改完东西调一下，几秒后自动落盘，防丢。 */
     fun scheduleAutoSave() {
+        bridge?.bumpRevision()
         autoSaveRunnable?.let { main.removeCallbacks(it) }
         val r = Runnable { save(null) }
         autoSaveRunnable = r

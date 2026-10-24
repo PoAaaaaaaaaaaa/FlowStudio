@@ -59,6 +59,17 @@ class StudioBridge(
     var port: Int = DEFAULT_PORT
         private set
 
+    /**
+     * 工程变更计数。用户每次在手机上改动都会 +1，
+     * 插件拿到的 revision 跟自己的不一样，就知道"我读到的是旧的"。
+     * 这是避免 AI 拿过期快照覆盖用户手动改动的最小机制。
+     */
+    @Volatile
+    var revision: Long = 0L
+        private set
+
+    fun bumpRevision() { revision++ }
+
     private var server: ServerSocket? = null
     private val stop = AtomicBoolean(false)
     private val pool = Executors.newFixedThreadPool(4) { r ->
@@ -222,7 +233,7 @@ class StudioBridge(
             when {
                 method == "GET" && path == "/state" -> 200 to stateJson()
                 method == "GET" && path == "/project" -> 200 to JSONObject(session.project.toText())
-                method == "PUT" && path == "/project" -> handlePutProject(body)
+                method == "PUT" && path == "/project" -> handlePutProject(body, query)
                 method == "GET" && path == "/transport" -> 200 to transportJson()
                 method == "POST" && path == "/transport/play" -> {
                     session.play(); 200 to transportJson()
@@ -253,6 +264,16 @@ class StudioBridge(
                 method == "GET" && path == "/patterns" -> 200 to patternsJson()
                 method == "PUT" && path.startsWith("/patterns/") ->
                     handlePutPattern(path.removePrefix("/patterns/").toIntOrNull(), body)
+                // 增量编辑：只动一条轨道的音符，不用传整首
+                method == "POST" && path == "/pattern/edit" -> handlePatternEdit(body)
+                // 追加音符
+                method == "POST" && path == "/notes/add" -> handleNotesAdd(body)
+                // 删音符
+                method == "POST" && path == "/notes/remove" -> handleNotesRemove(body)
+                // 移调/力度等批量变形
+                method == "POST" && path == "/notes/transform" -> handleNotesTransform(body)
+                // 试听某个音符（不写入，只发声）
+                method == "POST" && path == "/audition" -> handleAudition(body)
                 method == "POST" && path == "/clips" -> handleAddClip(body)
                 method == "DELETE" && path.startsWith("/clips/") ->
                     handleDeleteClip(path.removePrefix("/clips/").toIntOrNull())
@@ -296,6 +317,7 @@ class StudioBridge(
         val p = session.project
         return JSONObject()
             .put("ok", true)
+            .put("revision", revision)
             .put("name", p.name)
             .put("bpm", p.bpm.toDouble())
             .put("transport", transportJson())
@@ -385,8 +407,19 @@ class StudioBridge(
 
     // ---------------------------------------------------------------- 写操作
 
-    private fun handlePutProject(body: String): Pair<Int, JSONObject> {
+    private fun handlePutProject(body: String, query: Map<String, String>): Pair<Int, JSONObject> {
         if (body.isBlank()) return 400 to JSONObject().put("error", "body 为空")
+
+        // 乐观锁：插件带上它读到的 revision，如果用户在此期间改过东西，
+        // 我们就拒绝覆盖。否则 AI 会把用户刚手动调好的东西无声地冲掉。
+        val expect = query["revision"]?.toLongOrNull()
+        if (expect != null && expect != revision) {
+            return 409 to JSONObject()
+                .put("error", "工程已被改动（你看到的是 revision $expect，当前是 $revision）。" +
+                        "请重新读取状态后再写。")
+                .put("revision", revision)
+        }
+
         val loaded = Project.fromText(body)
             ?: return 400 to JSONObject().put("error", "不是合法的工程 JSON")
         // 基本体检，别把明显坏掉的东西塞给引擎
@@ -397,8 +430,10 @@ class StudioBridge(
             return 400 to JSONObject().put("error", "工程里没有样式")
         }
         session.replaceProject(loaded)
+        bumpRevision()
         return 200 to JSONObject()
             .put("ok", true)
+            .put("revision", revision)
             .put("name", loaded.name)
             .put("tracks", loaded.tracks.size)
             .put("patterns", loaded.patterns.size)
@@ -481,6 +516,207 @@ class StudioBridge(
             .put("id", pat.id)
             .put("name", pat.name)
             .put("notes", pat.noteCount())
+    }
+
+    /**
+     * 在某个样式的某条轨道上直接写音符（整体替换这一条轨道）。
+     * 这是插件最常用的编辑入口：改鼓的一条轨，不需要把整首歌传一遍。
+     */
+    private fun handlePatternEdit(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val patId = o.optInt("patternId", -1)
+        val trackIdx = o.optInt("track", -1)
+        val notesArr = o.optJSONArray("notes")
+            ?: return 400 to JSONObject().put("error", "需要 notes 数组")
+
+        val pat = session.project.patternById(patId)
+            ?: return 404 to JSONObject().put("error", "没有 id=$patId 的样式")
+        if (trackIdx !in session.project.tracks.indices) {
+            return 400 to JSONObject().put("error", "track $trackIdx 越界")
+        }
+        if (o.has("bars")) {
+            pat.bars = o.optInt("bars", pat.bars).coerceIn(1, 64)
+        }
+
+        val list = pat.notes(trackIdx)
+        list.clear()
+        for (i in 0 until notesArr.length()) {
+            val n = notesArr.optJSONObject(i) ?: continue
+            list.add(
+                Note(
+                    pitch = n.optInt("pitch", 60).coerceIn(0, 127),
+                    start = n.optInt("start", 0).coerceAtLeast(0),
+                    length = n.optInt("length", Note.STEP).coerceAtLeast(1),
+                    velocity = n.optInt("velocity", 100).coerceIn(1, 127)
+                )
+            )
+        }
+        list.sortBy { it.start }
+
+        session.pushBpm()
+        session.scheduleAutoSave()
+        bumpRevision()
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("revision", revision)
+            .put("patternId", patId)
+            .put("track", trackIdx)
+            .put("notes", list.size)
+    }
+
+    /** 往已有样式里追加音符，不影响原有内容 */
+    private fun handleNotesAdd(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val patId = o.optInt("patternId", -1)
+        val trackIdx = o.optInt("track", -1)
+        val arr = o.optJSONArray("notes")
+            ?: return 400 to JSONObject().put("error", "需要 notes 数组")
+
+        val pat = session.project.patternById(patId)
+            ?: return 404 to JSONObject().put("error", "没有 id=$patId 的样式")
+        if (trackIdx !in session.project.tracks.indices) {
+            return 400 to JSONObject().put("error", "track $trackIdx 越界")
+        }
+        val list = pat.notes(trackIdx)
+        var added = 0
+        for (i in 0 until arr.length()) {
+            val n = arr.optJSONObject(i) ?: continue
+            list.add(
+                Note(
+                    pitch = n.optInt("pitch", 60).coerceIn(0, 127),
+                    start = n.optInt("start", 0).coerceAtLeast(0),
+                    length = n.optInt("length", Note.STEP).coerceAtLeast(1),
+                    velocity = n.optInt("velocity", 100).coerceIn(1, 127)
+                )
+            )
+            added++
+        }
+        list.sortBy { it.start }
+        session.pushBpm()
+        session.scheduleAutoSave()
+        bumpRevision()
+        return 200 to JSONObject().put("ok", true).put("added", added).put("revision", revision)
+    }
+
+    /** 按条件删音符 */
+    private fun handleNotesRemove(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val patId = o.optInt("patternId", -1)
+        val pat = session.project.patternById(patId)
+            ?: return 404 to JSONObject().put("error", "没有 id=$patId 的样式")
+
+        val trackIdx = o.optInt("track", -1)
+        val targets = if (trackIdx >= 0) {
+            pat.notesOrNull(trackIdx)?.let { listOf(it) } ?: emptyList()
+        } else {
+            pat.tracks.values.toList()
+        }
+        if (targets.isEmpty()) {
+            return 200 to JSONObject().put("ok", true).put("removed", 0).put("revision", revision)
+        }
+
+        val all = o.optBoolean("all", false)
+        val pitchLo = o.optInt("pitchMin", 0)
+        val pitchHi = o.optInt("pitchMax", 127)
+        val startFrom = o.optInt("startFrom", 0)
+        val startTo = o.optInt("startTo", Int.MAX_VALUE)
+
+        var removed = 0
+        for (list in targets) {
+            if (all) {
+                removed += list.size
+                list.clear()
+            } else {
+                val before = list.size
+                list.removeAll {
+                    it.pitch in pitchLo..pitchHi && it.start >= startFrom && it.start < startTo
+                }
+                removed += before - list.size
+            }
+        }
+        session.pushBpm()
+        session.scheduleAutoSave()
+        bumpRevision()
+        return 200 to JSONObject().put("ok", true).put("removed", removed).put("revision", revision)
+    }
+
+    /**
+     * 批量变形：移调、改力度、量化、随机人性化。
+     * 这些是"改一下感觉"的操作，AI 最常用，也最需要原子地做完。
+     */
+    private fun handleNotesTransform(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val patId = o.optInt("patternId", -1)
+        val pat = session.project.patternById(patId)
+            ?: return 404 to JSONObject().put("error", "没有 id=$patId 的样式")
+
+        val trackIdx = o.optInt("track", -1)
+        val lists = if (trackIdx >= 0) {
+            listOfNotNull(pat.notesOrNull(trackIdx))
+        } else {
+            pat.tracks.values.toList()
+        }
+        if (lists.isEmpty()) {
+            return 200 to JSONObject().put("ok", true).put("touched", 0).put("revision", revision)
+        }
+
+        val transpose = o.optInt("transpose", 0)
+        val velocityScale = o.optDouble("velocityScale", 1.0).toFloat()
+        val velocitySet = if (o.has("velocity")) o.optInt("velocity", 100) else null
+        val quantize = o.optInt("quantize", 0)
+        val humanize = o.optDouble("humanize", 0.0).toFloat()
+
+        var touched = 0
+        val rnd = java.util.Random()
+        for (list in lists) {
+            for (n in list) {
+                if (transpose != 0) n.pitch = (n.pitch + transpose).coerceIn(0, 127)
+                if (velocitySet != null) n.velocity = velocitySet.coerceIn(1, 127)
+                else if (velocityScale != 1f) {
+                    n.velocity = (n.velocity * velocityScale).toInt().coerceIn(1, 127)
+                }
+                if (quantize > 0) {
+                    n.start = Math.round(n.start.toFloat() / quantize) * quantize
+                }
+                if (humanize > 0f) {
+                    val jitter = ((rnd.nextFloat() - 0.5f) * 2f * humanize * Note.STEP).toInt()
+                    n.fine = (n.fine + jitter).coerceIn(-Note.STEP, Note.STEP)
+                }
+                touched++
+            }
+            list.sortBy { it.start }
+        }
+        session.pushBpm()
+        session.scheduleAutoSave()
+        bumpRevision()
+        return 200 to JSONObject().put("ok", true).put("touched", touched).put("revision", revision)
+    }
+
+    /** 试听一个音符，不写入工程。AI 写完可以先让我听一下再决定。 */
+    private fun handleAudition(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val patId = o.optInt("patternId", -1)
+        val trackIdx = o.optInt("track", session.project.selectedTrack)
+
+        if (patId >= 0) {
+            // 试听整个样式的某条轨道：从头播一遍
+            val pat = session.project.patternById(patId)
+                ?: return 404 to JSONObject().put("error", "没有 id=$patId 的样式")
+            val notes = pat.notesOrNull(trackIdx)
+            if (notes.isNullOrEmpty()) {
+                return 200 to JSONObject().put("ok", true).put("played", 0)
+            }
+            // 用第一条音符的音高起头，快速给个听觉反馈
+            session.previewNote(trackIdx, notes.first().pitch, notes.first().velocity,
+                (pat.lengthTicks).coerceAtMost(Note.BAR))
+            return 200 to JSONObject().put("ok", true).put("played", notes.size)
+        }
+
+        val pitch = o.optInt("pitch", 60)
+        val vel = o.optInt("velocity", 100)
+        val dur = o.optInt("duration", Note.STEP * 4)
+        session.previewNote(trackIdx, pitch, vel, dur)
+        return 200 to JSONObject().put("ok", true).put("pitch", pitch)
     }
 
     private fun handleAddClip(body: String): Pair<Int, JSONObject> {

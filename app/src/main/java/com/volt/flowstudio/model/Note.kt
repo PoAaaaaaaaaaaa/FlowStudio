@@ -5,12 +5,14 @@ data class Note(
     var pitch: Int,
     var start: Int,
     var length: Int,
-    var velocity: Int = 100
+    var velocity: Int = 100,
+    /** 起始微调，单位 tick。摇摆与人性化靠它，不动 start 保持网格干净。 */
+    var fine: Int = 0
 ) {
     val end: Int get() = start + length
     fun covers(t: Int) = t in start until end
 
-    fun copyNote() = Note(pitch, start, length, velocity)
+    fun copyNote() = Note(pitch, start, length, velocity, fine)
 
     companion object {
         const val PPQ = 480

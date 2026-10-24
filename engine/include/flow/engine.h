@@ -92,6 +92,9 @@ public:
     void setLoop(bool on, double startTick, double endTick);
     bool loopOn() const { return loop_.load(); }
     void setMetronome(bool on) { metronome_.store(on, std::memory_order_relaxed); }
+    void setMetronomeVolume(float v) {
+        metronomeVolume_.store(clampf(v, 0.f, 1.f), std::memory_order_relaxed);
+    }
 
     // ---- 编排 ----
     void setSchedule(const Schedule& s);
@@ -167,6 +170,7 @@ private:
     std::atomic<double> loopStart_{0.0};
     std::atomic<double> loopEnd_{0.0};
     std::atomic<bool> metronome_{false};
+    std::atomic<float> metronomeVolume_{0.6f};
 
     float sampleRate_ = 48000.f;
     int maxBlock_ = 512;

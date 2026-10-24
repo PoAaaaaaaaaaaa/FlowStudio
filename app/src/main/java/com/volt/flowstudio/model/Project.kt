@@ -9,6 +9,12 @@ class Project {
     var bpm: Float = 128f
     var beatsPerBar: Int = 4
 
+    /** 摇摆量 0..1，0 是正拍。0.5 大约是三连音的摇摆感。 */
+    var swing: Float = 0f
+
+    /** 节拍器音量 0..1 */
+    var metronomeVolume: Float = 0.6f
+
     val tracks = mutableListOf<Track>()
     val patterns = mutableListOf<Pattern>()
     val clips = mutableListOf<Clip>()
@@ -99,8 +105,14 @@ class Project {
                     val clampStart = maxOf(absStart, clip.start)
                     val clampEnd = minOf(absEnd, clip.end)
                     if (clampEnd <= clampStart) continue
-                    out.add(clampStart)
-                    out.add(clampEnd)
+                    // 摇摆：把落在奇数个 16 分音符上的音往后推。
+                    // 推的量由 swing 决定，最大半个 16 分音符（=三连音的感觉）。
+                    val swingShift = if (swing > 0.001f && (clampStart / Note.STEP) % 2 == 1) {
+                        (swing * Note.STEP * 0.5f).toInt()
+                    } else 0
+                    val shifted = clampStart + swingShift + n.fine
+                    out.add(maxOf(0, shifted))
+                    out.add(clampEnd + swingShift + n.fine)
                     out.add(n.pitch)
                     out.add(n.velocity)
                     out.add(trackIndex)
@@ -139,6 +151,8 @@ class Project {
         put("name", name)
         put("bpm", bpm.toDouble())
         put("beatsPerBar", beatsPerBar)
+        put("swing", swing.toDouble())
+        put("metronomeVolume", metronomeVolume.toDouble())
         put("masterVolume", masterVolume)
         put("masterLimiter", masterLimiter)
         put("masterSoftClip", masterSoftClip)
@@ -165,6 +179,8 @@ class Project {
             p.name = o.optString("name", "工程")
             p.bpm = o.optDouble("bpm", 128.0).toFloat().coerceIn(20f, 300f)
             p.beatsPerBar = o.optInt("beatsPerBar", 4)
+            p.swing = o.optDouble("swing", 0.0).toFloat().coerceIn(0f, 1f)
+            p.metronomeVolume = o.optDouble("metronomeVolume", 0.6).toFloat().coerceIn(0f, 1f)
             p.masterVolume = o.optInt("masterVolume", 80).coerceIn(0, 100)
             p.masterLimiter = o.optBoolean("masterLimiter", true)
             p.masterSoftClip = o.optBoolean("masterSoftClip", true)
@@ -226,6 +242,7 @@ class Project {
             val p = Project()
             p.name = "Demo House"
             p.bpm = 124f
+            p.swing = 0f
             p.tracks.addAll(
                 listOf(
                     Track.preset(Instrument.DRUM, "Kick").apply {

@@ -32,6 +32,8 @@ class TransportBar @JvmOverloads constructor(
     var onMetronomeToggle: ((Boolean) -> Unit)? = null
     var onSave: (() -> Unit)? = null
     var onExport: (() -> Unit)? = null
+    var onProject: (() -> Unit)? = null
+    var onSwing: (() -> Unit)? = null
 
     private var dragBpm = false
     private var lastY = 0f
@@ -44,6 +46,8 @@ class TransportBar @JvmOverloads constructor(
     private var metroRect = FloatArray(4)
     private var saveRect = FloatArray(4)
     private var exportRect = FloatArray(4)
+    private var projectRect = FloatArray(4)
+    private var swingRect = FloatArray(4)
 
     fun setPlaying(v: Boolean) { playing = v; invalidate() }
     fun setLoop(v: Boolean) { loopOn = v; invalidate() }
@@ -127,6 +131,16 @@ class TransportBar @JvmOverloads constructor(
         saveRect = floatArrayOf(rightX - dp(52f) - dp(46f), top, rightX - dp(52f) - dp(6f), top + btnH)
         rect(canvas, saveRect[0], saveRect[1], saveRect[2], saveRect[3], Palette.PANEL_HI, dp(4f))
         label(canvas, "保存", saveRect[0] + dp(20f), top + btnH / 2 + dp(4f), Palette.TEXT_DIM, sp(9.5f), bold = true, center = true)
+
+        // 工程管理
+        projectRect = floatArrayOf(saveRect[0] - dp(46f), top, saveRect[0] - dp(6f), top + btnH)
+        rect(canvas, projectRect[0], projectRect[1], projectRect[2], projectRect[3], Palette.PANEL_HI, dp(4f))
+        label(canvas, "工程", projectRect[0] + dp(20f), top + btnH / 2 + dp(4f), Palette.TEXT_DIM, sp(9.5f), bold = true, center = true)
+
+        // 摇摆
+        swingRect = floatArrayOf(metroRect[2] + dp(2f), top, metroRect[2] + dp(40f), top + btnH)
+        rect(canvas, swingRect[0], swingRect[1], swingRect[2], swingRect[3], Palette.PANEL_HI, dp(4f))
+        label(canvas, "摇摆", swingRect[0] + dp(19f), top + btnH / 2 + dp(4f), Palette.TEXT_DIM, sp(9.5f), bold = true, center = true)
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -143,6 +157,8 @@ class TransportBar @JvmOverloads constructor(
                     return true
                 }
                 if (hit(e.x, e.y, saveRect[0], saveRect[1], saveRect[2], saveRect[3])) { onSave?.invoke(); return true }
+                if (hit(e.x, e.y, projectRect[0], projectRect[1], projectRect[2], projectRect[3])) { onProject?.invoke(); return true }
+                if (hit(e.x, e.y, swingRect[0], swingRect[1], swingRect[2], swingRect[3])) { onSwing?.invoke(); return true }
                 if (hit(e.x, e.y, exportRect[0], exportRect[1], exportRect[2], exportRect[3])) { onExport?.invoke(); return true }
                 if (hit(e.x, e.y, bpmRect[0], bpmRect[1], bpmRect[2], bpmRect[3])) {
                     dragBpm = true

@@ -239,6 +239,57 @@ int main() {
         check(actual > expected && actual < expected + 3.5, msg);
     }
 
+    // ---------- 8. 回归：clearTracks + setTrackConfig 之后必须还能出声 ----------
+    // 1.0.2 的致命 bug：pushAll() 先 clearTracks() 把 trackCount 归零，
+    // 再逐条 setChannel；而 setTrackConfig 不维护 trackCount，
+    // 渲染循环 for (t = 0; t < trackCount) 一次都不跑 —— 完全没有声音，
+    // 而且不报任何错，用户只看到"点了播放没反应"。
+    {
+        Engine e;
+        e.prepare((float)SR, 512);
+        e.setBpm(120.f);
+        const int N = 4;
+
+        // 完全复刻 pushAll 的调用顺序
+        e.clearTracks();
+        for (int i = 0; i < N; i++) {
+            Channel ch = makeChannel(Instrument::Synth, 0.8f);
+            ch.fx[0].type = EffectType::None;
+            e.setTrackConfig(i, ch);
+        }
+
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "clearTracks+setTrackConfig 后 trackCount=%d（应为 %d）",
+                      e.trackCount(), N);
+        check(e.trackCount() == N, msg);
+
+        Schedule s;
+        for (int i = 0; i < 4; i++) {
+            s.notes.push_back(FlatNote{i * kPPQ, i * kPPQ + kPPQ / 2, 60, 100, 0, 0});
+        }
+        s.totalTicks = kPPQ * 4;
+        e.setSchedule(s);
+        e.setMaster(0.8f, false, false, 0.f);
+
+        auto r = e.renderOffline(0, kPPQ * 4, SR, false);
+        float peak, rms, dc;
+        stats(r.interleaved, peak, rms, dc);
+        std::snprintf(msg, sizeof(msg), "clearTracks 后仍能出声 peak=%.3f rms=%.4f", peak, rms);
+        check(peak > 0.01f && rms > 0.001f, msg);
+    }
+
+    // ---------- 9. 回归：轨道下标跳着设置也要正确计数 ----------
+    {
+        Engine e;
+        e.prepare((float)SR, 512);
+        e.clearTracks();
+        // 只设第 3 条，trackCount 应该是 4（0..3 都算上），否则前三条渲染不到
+        e.setTrackConfig(3, makeChannel(Instrument::Synth, 0.8f));
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "跳号设置轨道 3 后 trackCount=%d（应 >= 4）", e.trackCount());
+        check(e.trackCount() >= 4, msg);
+    }
+
     std::printf("\n%s  失败 %d 项\n", gFail == 0 ? "全部通过" : "有失败", gFail);
     return gFail == 0 ? 0 : 1;
 }

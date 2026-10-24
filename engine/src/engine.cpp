@@ -172,6 +172,18 @@ void Engine::setTrackConfig(int index, const Channel& ch) {
     if (index < 0 || index >= kMaxTracks) return;
     Channel& dst = channels_[(size_t)index];
 
+    // 关键：setTrackConfig 必须自己维护 trackCount_。
+    // 渲染循环是 for (t = 0; t < trackCount; ++t)，pushAll() 会先 clearTracks()
+    // 把它归零，然后逐条 setChannel。如果这里不抬高计数，
+    // 循环一次都不执行 —— 引擎渲染的是彻底的沉默，
+    // 表现为"点了播放但一点声音都没有"，而且没有任何报错。
+    {
+        const int needed = index + 1;
+        if (trackCount_.load(std::memory_order_relaxed) < needed) {
+            trackCount_.store(needed, std::memory_order_release);
+        }
+    }
+
     dst.instrument = ch.instrument;
     std::memcpy(dst.params, ch.params, sizeof(dst.params));
     dst.transpose = ch.transpose;
@@ -368,7 +380,9 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
                     mp[0] = downbeat ? 0.92f : 0.78f;
                     mp[1] = 0.04f;
                     mp[2] = 0.30f;
-                    slot->setup(Instrument::Drum, 42, downbeat ? 0.55f : 0.34f,
+                    const float mv = metronomeVolume_.load(std::memory_order_relaxed);
+                    slot->setup(Instrument::Drum, 42,
+                                (downbeat ? 0.55f : 0.34f) * mv,
                                 (int32_t)(pos + kStep), (int16_t)-1, mp, sampleRate_);
                 }
             }

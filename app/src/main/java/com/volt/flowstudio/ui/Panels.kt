@@ -25,6 +25,7 @@ class SoundPanel(
 
     private var instRow: LinearLayout = LinearLayout(context)
     private var paramRow: LinearLayout = LinearLayout(context)
+    private var presetRow: LinearLayout = LinearLayout(context)
 
     init {
         orientation = VERTICAL
@@ -74,6 +75,7 @@ class SoundPanel(
                     // 换乐器后用该乐器的出厂参数，避免落到"听起来是坏的"参数组合
                     Track.preset(inst, t.name).params.copyInto(t.params)
                     paintInstrumentButtons(inst)
+                    rebuildPresets(presetRow, inst)
                     rebuildKnobs()
                     session.pushTrack(trackIndex)
                     session.scheduleAutoSave()
@@ -85,6 +87,26 @@ class SoundPanel(
             instRow.addView(btn, lp)
         }
         paintInstrumentButtons(t0.instrument)
+
+        // ---- 预设库 ----
+        // FL 之所以好用，一半在于"选个名字就有能用的音色"。
+        val presetTitle = TextView(context).apply {
+            text = "预设"
+            setTextColor(Palette.TEXT_FAINT)
+            textSize = 10f
+            setPadding(0, dp(8), 0, dp(2))
+        }
+        addView(presetTitle)
+
+        presetRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+        addView(
+            HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(presetRow)
+            },
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        )
+        rebuildPresets(presetRow, t0.instrument)
 
         // 参数旋钮
         paramRow = LinearLayout(context).apply {
@@ -188,6 +210,45 @@ class SoundPanel(
             },
             LayoutParams(dp(58), dp(74))
         )
+    }
+
+    /** 某乐器的预设按钮。点一下整套参数 + 效果一键套上。 */
+    private fun rebuildPresets(row: LinearLayout, inst: com.volt.flowstudio.model.Instrument) {
+        row.removeAllViews()
+        val list = com.volt.flowstudio.model.Presets.forInstrument(inst)
+        if (list.isEmpty()) {
+            row.addView(TextView(context).apply {
+                text = "（这个乐器没有预设）"
+                setTextColor(Palette.TEXT_FAINT)
+                textSize = 10f
+                setPadding(0, dp(4), 0, dp(4))
+            })
+            return
+        }
+        for (preset in list) {
+            val btn = TextView(context).apply {
+                text = preset.name
+                textSize = 10.5f
+                setPadding(dp(9), dp(6), dp(9), dp(6))
+                setTextColor(Palette.TEXT)
+                setBackgroundColor(Palette.PANEL_HI)
+                setOnClickListener {
+                    val t = session.project.trackAt(trackIndex) ?: return@setOnClickListener
+                    com.volt.flowstudio.model.Presets.apply(preset, t)
+                    rebuildKnobs()
+                    paintInstrumentButtons(preset.inst)
+                    session.pushTrack(trackIndex)
+                    session.scheduleAutoSave()
+                    onChanged()
+                    android.widget.Toast.makeText(
+                        context, "已套用「${preset.name}」", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            val lp = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+            lp.marginEnd = dp(4)
+            row.addView(btn, lp)
+        }
     }
 
     private fun signed(v: Int): String = if (v > 0) "+$v" else "$v"

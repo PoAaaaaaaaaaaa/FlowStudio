@@ -132,6 +132,13 @@ Java_com_volt_flowstudio_audio_NativeEngine_nativeSetMetronome(JNIEnv*, jobject,
     if (e) e->setMetronome(on == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeSetMetronomeVolume(JNIEnv*, jobject, jlong handle,
+                                                                     jfloat v) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    if (e) e->setMetronomeVolume(v);
+}
+
 // ---------------------------------------------------------------- 编排
 
 JNIEXPORT void JNICALL

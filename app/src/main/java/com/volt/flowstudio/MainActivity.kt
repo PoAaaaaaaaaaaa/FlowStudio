@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var mixer: MixerView
     private lateinit var auto: AutomationView
     private lateinit var keys: KeyboardView
+    private lateinit var rack: ChannelRackView
     private lateinit var banner: android.widget.TextView
 
     private var currentTab = 0    // 0=步进 1=钢琴卷帘 2=播放列表 3=混音台 4=自动化
@@ -74,7 +75,7 @@ class MainActivity : Activity() {
         ).apply { gravity = android.view.Gravity.TOP })
 
         tabBar = TabBar(this).apply {
-            tabs = listOf("步进器", "钢琴卷帘", "播放列表", "混音台", "自动化")
+            tabs = listOf("机架", "卷帘", "播放列表", "混音台", "自动化", "钢琴")
         }
         root.addView(tabBar, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, dp(30)
@@ -98,7 +99,11 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
         ).apply { topMargin = dp(74) })
 
-        // 步进器
+        // 0. 通道机架（FL 的骨架界面）
+        rack = ChannelRackView(this)
+        content.addView(rack, matchParams())
+
+        // 步进器（保留，作为机架的放大版）
         steps = StepSequencerView(this)
         content.addView(steps, matchParams())
 
@@ -166,9 +171,66 @@ class MainActivity : Activity() {
         }
         transportBar.onMetronomeToggle = { on -> session.setMetronome(on) }
         transportBar.onSave = { session.save(null) }
-        transportBar.onExport = { doExport() }
+        transportBar.onExport = { showExportDialog() }
+        transportBar.onProject = { showProjectDialog() }
+        transportBar.onSwing = { showSwingDialog() }
 
         tabBar.onTabSelected = { showTab(it) }
+
+        // ---- 通道机架 ----
+        rack.onSelectTrack = { idx ->
+            session.project.selectedTrack = idx
+            refreshKeyboardForTrack()
+            rack.invalidate()
+            steps.invalidate()
+        }
+        rack.onToggleStep = step@{ track, tick ->
+            val p = session.project
+            val pat = p.patternAt(p.currentPattern) ?: return@step
+            val notes = pat.notes(track)
+            val existing = notes.firstOrNull { it.start == tick }
+            if (existing != null) {
+                notes.remove(existing)
+            } else {
+                val inst = p.trackAt(track)?.instrument
+                val pitch = when (inst) {
+                    com.volt.flowstudio.model.Instrument.DRUM -> 36
+                    com.volt.flowstudio.model.Instrument.BASS -> 36
+                    else -> 60
+                }
+                notes.add(com.volt.flowstudio.model.Note(pitch, tick, com.volt.flowstudio.model.Note.STEP, 100))
+                notes.sortBy { it.start }
+                session.previewNote(track, pitch, 100, 160)
+            }
+            session.pushBpm()
+            session.scheduleAutoSave()
+            rack.invalidate()
+            steps.invalidate()
+        }
+        rack.onToggleMute = { idx ->
+            session.project.trackAt(idx)?.let { it.mute = !it.mute }
+            session.pushTrack(idx)
+            session.scheduleAutoSave()
+            rack.invalidate()
+        }
+        rack.onToggleSolo = { idx ->
+            session.project.trackAt(idx)?.let { it.solo = !it.solo }
+            session.pushAll()
+            session.scheduleAutoSave()
+            rack.invalidate()
+        }
+        rack.onVolumeChange = { idx, _ ->
+            session.pushTrack(idx)
+            session.scheduleAutoSave()
+        }
+        rack.onOpenInstrument = { idx -> openSoundPanel(idx) }
+        rack.onPreview = { idx ->
+            val inst = session.project.trackAt(idx)?.instrument
+            val pitch = if (inst == com.volt.flowstudio.model.Instrument.DRUM) 36 else 60
+            session.previewNote(idx, pitch, 100, 480)
+        }
+        rack.onAddTrack = { showAddTrackDialog() }
+        rack.onRemoveTrack = { idx -> removeTrack(idx) }
 
         // ---- 步进器 ----
         steps.onToggleStep = step@{ track, tick ->
@@ -244,6 +306,10 @@ class MainActivity : Activity() {
     private fun refreshAll(p: Project) {
         transportBar.bpm = p.bpm
         transportBar.setLoop(p.loopOn)
+        rack.project = p
+        rack.currentPatternIndex = p.currentPattern
+        rack.selectedTrack = p.selectedTrack
+        rack.invalidate()
         steps.pattern = p.patternAt(p.currentPattern)
         steps.trackNames = p.tracks.map { it.name }
         steps.trackColors = p.tracks.indices.map { Palette.trackColor(it) }
@@ -265,6 +331,8 @@ class MainActivity : Activity() {
 
     private fun showTab(index: Int) {
         currentTab = index
+        // 页签顺序变了，确保索引不越界
+        if (index !in 0 until content.childCount) return
         for (i in 0 until content.childCount) {
             content.getChildAt(i).visibility = if (i == index) View.VISIBLE else View.GONE
         }
@@ -293,22 +361,27 @@ class MainActivity : Activity() {
         transportBar.bpm = session.project.bpm
         transportBar.setPlaying(session.isPlaying())
         when (currentTab) {
-            0 -> { steps.playheadTick = pos; }
-            1 -> {
+            0 -> {
+                rack.playheadTick = pos
+                rack.levels = session.engine.trackLevels()
+                rack.invalidate()
+            }
+            1 -> { steps.playheadTick = pos; }
+            2 -> {
                 piano.playheadTick = pos
                 piano.scrollToPlayhead(pos)
             }
-            2 -> {
+            3 -> {
                 playlist.playheadTick = pos
                 if (session.isPlaying()) playlist.scrollToPlayheadIfNeeded(pos)
             }
-            3 -> {
+            4 -> {
                 mixer.levels = session.engine.trackLevels()
                 val pk = session.engine.masterPeak()
                 mixer.masterL = pk.getOrElse(0) { 0f }
                 mixer.masterR = pk.getOrElse(1) { 0f }
             }
-            4 -> auto.playheadTick = pos
+            5 -> auto.playheadTick = pos
         }
     }
 
@@ -339,12 +412,13 @@ class MainActivity : Activity() {
         )
     }
 
+    /** 一键导出（默认 44100） */
     private fun doExport() {
         val p = session.project
-        toast("开始渲染…")
-        session.exportWav(0, p.lengthTicks()) { file ->
+        toast("渲染中…")
+        session.exportWav(0, p.lengthTicks(), 44100) { file ->
             if (file != null) {
-                toast("导出到 ${file.absolutePath}")
+                toast("已导出 ${file.name}")
                 session.shareFile(file)
             } else {
                 toast("导出失败")
@@ -395,6 +469,204 @@ class MainActivity : Activity() {
                 startActivity(android.content.Intent.createChooser(i, "分享诊断信息"))
             }
             .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- 通道与工程
+
+    /** 添加通道：先选乐器，再给个名字 */
+    private fun showAddTrackDialog() {
+        val insts = com.volt.flowstudio.model.Instrument.values()
+        val names = insts.map { it.cn }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("添加通道")
+            .setItems(names) { _, which ->
+                val inst = insts[which]
+                // 用该乐器第一个预设，避免"新建出来是个哑音色"
+                val preset = com.volt.flowstudio.model.Presets.forInstrument(inst).firstOrNull()
+                val idx = session.project.addTrack(inst, preset?.name ?: inst.cn)
+                if (preset != null) {
+                    session.project.trackAt(idx)?.let { com.volt.flowstudio.model.Presets.apply(preset, it) }
+                }
+                session.pushAll()
+                session.scheduleAutoSave()
+                refreshAll(session.project)
+                toast("已添加 ${inst.cn}")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun removeTrack(idx: Int) {
+        val p = session.project
+        val t = p.trackAt(idx) ?: return
+        if (p.tracks.size <= 1) {
+            toast("至少要留一条通道")
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("删除通道「${t.name}」？")
+            .setMessage("这个通道在播放列表里的片段和所有样式里的音符都会一起删掉。")
+            .setPositiveButton("删除") { _, _ ->
+                // 删轨道时把相关的东西都清掉，否则会留下指向不存在轨道的片段
+                p.patterns.forEach { pat -> pat.tracks.remove(idx) }
+                // 比 idx 大的轨道下标整体前移
+                p.patterns.forEach { pat ->
+                    val moved = mutableMapOf<Int, MutableList<com.volt.flowstudio.model.Note>>()
+                    pat.tracks.forEach { (k, v) ->
+                        moved[if (k > idx) k - 1 else k] = v
+                    }
+                    pat.tracks.clear()
+                    pat.tracks.putAll(moved)
+                }
+                p.clips.removeAll { it.track == idx }
+                p.clips.forEach { if (it.track > idx) it.track -= 1 }
+                p.automations.removeAll { it.track == idx }
+                p.automations.forEach { if (it.track > idx) it.track -= 1 }
+
+                p.tracks.removeAt(idx)
+                if (p.selectedTrack >= p.tracks.size) p.selectedTrack = (p.tracks.size - 1).coerceAtLeast(0)
+                session.pushAll()
+                session.scheduleAutoSave()
+                refreshAll(p)
+                toast("已删除")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 工程管理：新建、打开、另存、删除 */
+    private fun showProjectDialog() {
+        val files = session.listProjects()
+        val items = mutableListOf<String>()
+        items.add("＋ 新建空工程")
+        items.add("＋ 新建示例工程")
+        items.add("💾 另存为…")
+        if (files.isNotEmpty()) items.add("──────────")
+        files.forEach { items.add("📂 ${it.nameWithoutExtension}") }
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("工程")
+            .setItems(items.toTypedArray()) { _, which ->
+                when {
+                    which == 0 -> {
+                        session.newProject(false)
+                        refreshAll(session.project)
+                        toast("已新建")
+                    }
+                    which == 1 -> {
+                        session.newProject(true)
+                        refreshAll(session.project)
+                        toast("已载入示例")
+                    }
+                    which == 2 -> askSaveAs()
+                    items[which].startsWith("📂") -> {
+                        val name = items[which].removePrefix("📂 ").trim()
+                        val f = files.firstOrNull { it.nameWithoutExtension == name }
+                        if (f != null) {
+                            session.load(f) { ok -> if (ok) toast("已打开 $name") }
+                        }
+                    }
+                }
+            }
+            .setNeutralButton("删除工程…") { _, _ -> showDeleteProjectDialog(files) }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun askSaveAs() {
+        val input = android.widget.EditText(this).apply {
+            setText(session.project.name)
+            setSelectAllOnFocus(true)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("另存为")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "未命名" }
+                session.save(name) { ok -> toast(if (ok) "已保存 $name" else "保存失败") }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showDeleteProjectDialog(files: List<java.io.File>) {
+        if (files.isEmpty()) {
+            toast("没有可删除的工程")
+            return
+        }
+        val names = files.map { it.nameWithoutExtension }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("删除工程")
+            .setItems(names) { _, which ->
+                val f = files[which]
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("确认删除「${f.nameWithoutExtension}」？")
+                    .setMessage("文件会被删掉，不能恢复。")
+                    .setPositiveButton("删除") { _, _ ->
+                        val ok = runCatching { f.delete() }.getOrDefault(false)
+                        toast(if (ok) "已删除" else "删除失败")
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    /** 导出选项：采样率、范围 */
+    private fun showExportDialog() {
+        val rates = arrayOf("44100 Hz（CD 标准）", "48000 Hz（视频常用）", "22050 Hz（小文件）")
+        val rateVals = intArrayOf(44100, 48000, 22050)
+        var chosen = 0
+        android.app.AlertDialog.Builder(this)
+            .setTitle("导出 WAV")
+            .setSingleChoiceItems(rates, 0) { _, which -> chosen = which }
+            .setPositiveButton("开始") { _, _ ->
+                val p = session.project
+                val sr = rateVals[chosen]
+                toast("渲染中…")
+                session.exportWav(0, p.lengthTicks(), sr) { file ->
+                    if (file != null) {
+                        toast("已导出 ${file.name}")
+                        session.shareFile(file)
+                    } else {
+                        toast("导出失败")
+                    }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 摇摆量调节，放长按播放条出口太重，这里给个显式入口 */
+    private fun showSwingDialog() {
+        val p = session.project
+        val sb = android.widget.SeekBar(this).apply {
+            max = 100
+            progress = (p.swing * 100).toInt()
+        }
+        val wrap = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(4))
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = "摇摆量：奇数个 16 分音符往后推，0 为正拍"
+                setTextColor(Palette.TEXT_DIM)
+                textSize = 12f
+            })
+            addView(sb)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("摇摆 / Swing")
+            .setView(wrap)
+            .setPositiveButton("应用") { _, _ ->
+                p.swing = sb.progress / 100f
+                session.pushBpm()
+                session.scheduleAutoSave()
+                rack.invalidate()
+                toast("摇摆 ${sb.progress}%")
+            }
+            .setNegativeButton("取消", null)
             .show()
     }
 

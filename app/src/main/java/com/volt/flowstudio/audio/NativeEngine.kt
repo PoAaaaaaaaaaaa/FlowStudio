@@ -83,6 +83,7 @@ class NativeEngine private constructor() {
     fun setLoop(on: Boolean, startTick: Double, endTick: Double) =
         withHandle { nativeSetLoop(it, on, startTick, endTick) }
     fun setMetronome(on: Boolean) = withHandle { nativeSetMetronome(it, on) }
+    fun setMetronomeVolume(v: Float) = withHandle { nativeSetMetronomeVolume(it, v) }
 
     fun setSchedule(flat: IntArray, totalTicks: Int) = withHandle { nativeSetSchedule(it, flat, totalTicks) }
 
@@ -155,6 +156,7 @@ class NativeEngine private constructor() {
     private external fun nativeSetBpm(handle: Long, bpm: Float)
     private external fun nativeSetLoop(handle: Long, on: Boolean, start: Double, end: Double)
     private external fun nativeSetMetronome(handle: Long, on: Boolean)
+    private external fun nativeSetMetronomeVolume(handle: Long, v: Float)
     private external fun nativeSetSchedule(handle: Long, flat: IntArray, totalTicks: Int)
     private external fun nativeClearTracks(handle: Long)
     private external fun nativeSetChannel(
