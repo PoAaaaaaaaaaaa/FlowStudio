@@ -55,6 +55,9 @@ class StudioBridge(
     var running = false
         private set
 
+    /** 全量状态快照。所有 /status 系列接口都走它。 */
+    private val snapshot by lazy { StatusSnapshot(session, context.applicationContext) }
+
     @Volatile
     var port: Int = DEFAULT_PORT
         private set
@@ -273,6 +276,13 @@ class StudioBridge(
         return try {
             when {
                 method == "GET" && path == "/state" -> 200 to stateJson()
+                // 三种粒度的全量状态
+                method == "GET" && path == "/status" -> 200 to snapshot.summary()
+                method == "GET" && path == "/status/full" -> 200 to snapshot.full()
+                method == "GET" && path == "/status/health" -> 200 to snapshot.health()
+                method == "GET" && path == "/status/text" -> 200 to JSONObject()
+                    .put("ok", true)
+                    .put("text", snapshot.humanReadable())
                 method == "GET" && path == "/project" -> 200 to JSONObject(session.project.toText())
                 method == "PUT" && path == "/project" -> handlePutProject(body, query)
                 method == "GET" && path == "/transport" -> 200 to transportJson()

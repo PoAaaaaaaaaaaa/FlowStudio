@@ -338,6 +338,74 @@ int main() {
         (void)activeAfter;
     }
 
+    // ---------- 11. 回归：块长大于 prepare 时的块，也绝不能静默 ----------
+    // 这是"点了播放没声音也不报错"最隐蔽的一种：
+    // renderInterleaved 里 `outL_.size() < frames` 就直接 return，
+    // 设备永远拿到全零缓冲，而且日志里什么也没有。
+    {
+        Engine e;
+        e.prepare((float)SR, 256);          // 按 256 准备
+        e.setBpm(120.f);
+        e.clearTracks();
+        e.setTrackConfig(0, makeChannel(Instrument::Synth, 0.85f));
+        e.setMaster(0.9f, false, false, 0.f);
+
+        Schedule s;
+        for (int i = 0; i < 8; i++) {
+            s.notes.push_back(FlatNote{i * kPPQ, i * kPPQ + kPPQ, 60, 110, 0, 0});
+        }
+        s.totalTicks = kPPQ * 8;
+        e.setSchedule(s);
+        e.play();
+
+        // 请求 1024 帧，远大于 prepare 时的 256
+        const int big = 1024;
+        std::vector<float> buf((size_t)big * 2, 0.f);
+        float peak = 0.f;
+        for (int round = 0; round < 20; round++) {
+            e.renderInterleaved(buf.data(), big);
+            for (int i = 0; i < big * 2; i++) peak = std::max(peak, std::fabs(buf[(size_t)i]));
+        }
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "prepare(256) 后请求 1024 帧仍然有声 peak=%.3f", peak);
+        check(peak > 0.01f, msg);
+    }
+
+    // ---------- 12. 回归：反复 prepare 不会让输出变哑 ----------
+    // 音频线程运行中设备可能报告不同采样率，触发二次 prepare。
+    // 以前的实现会在 prepare 里 assign() 重建缓冲，指针一变就可能整块跳过。
+    {
+        Engine e;
+        e.prepare((float)SR, 256);
+        e.setBpm(120.f);
+        e.clearTracks();
+        e.setTrackConfig(0, makeChannel(Instrument::Synth, 0.85f));
+
+        Schedule s;
+        s.notes.push_back(FlatNote{0, kPPQ * 4, 60, 110, 0, 0});
+        s.totalTicks = kPPQ * 4;
+        e.setSchedule(s);
+        e.play();
+
+        const int n = 512;
+        std::vector<float> buf((size_t)n * 2, 0.f);
+        float peak = 0.f;
+        for (int round = 0; round < 10; round++) {
+            // 每轮中间换一次采样率/块长，模拟设备路由变化
+            e.prepare(round % 2 == 0 ? 48000.f : 44100.f, round % 2 == 0 ? 256 : 1024);
+            e.applyScheduleAgain();
+            e.play();
+            for (int k = 0; k < 10; k++) {
+                e.renderInterleaved(buf.data(), n);
+                for (int i = 0; i < n * 2; i++) peak = std::max(peak, std::fabs(buf[(size_t)i]));
+            }
+        }
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "反复 prepare 之后仍然有声 peak=%.3f", peak);
+        check(peak > 0.01f, msg);
+    }
+
     std::printf("\n%s  失败 %d 项\n", gFail == 0 ? "全部通过" : "有失败", gFail);
     return gFail == 0 ? 0 : 1;
 }

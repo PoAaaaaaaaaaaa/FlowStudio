@@ -396,6 +396,23 @@ Java_com_volt_flowstudio_audio_NativeEngine_nativeIsAudioRunning(JNIEnv*, jobjec
     return (e && e->isAudioRunning()) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jlongArray JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeStats(JNIEnv* env, jobject, jlong handle) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    jlongArray out = env->NewLongArray(3);
+    if (!out) return nullptr;
+    jlong v[3] = {0, 0, 0};
+    if (e) {
+        auto st = e->stats();
+        // 把 float 峰值放大成整数传，避免 Java 侧再开一个 float 数组
+        v[0] = (jlong)st.framesRendered;
+        v[1] = (jlong)(st.peakEver * 1000000.f);
+        v[2] = (jlong)st.callbacks;
+    }
+    env->SetLongArrayRegion(out, 0, 3, v);
+    return out;
+}
+
 JNIEXPORT jfloat JNICALL
 Java_com_volt_flowstudio_audio_NativeEngine_nativeSampleRate(JNIEnv*, jobject, jlong handle) {
     auto* e = reinterpret_cast<Engine*>((intptr_t)handle);

@@ -100,6 +100,9 @@ public:
     void setSchedule(const Schedule& s);
     int32_t scheduleLengthTicks() const { return schedule_.totalTicks; }
 
+    /** 把已装载的 schedule 的游标复位。prepare 之后要重放时用。 */
+    void applyScheduleAgain() { noteCursor_.store(0, std::memory_order_release); }
+
     // ---- 通道 ----
     int addTrack(const Channel& ch);
     void clearTracks();
@@ -118,6 +121,17 @@ public:
 
     // ---- 实时反馈 ----
     float trackPeak(int index) const;
+
+    // ---- 诊断探针 ----
+    // 用户说"没声音"时，光看代码无法区分是
+    //   a) 音频流没起来   b) 起来了但渲染的是静音   c) 渲染有声但设备不出声
+    // 这三个数字能把它们分开。
+    struct AudioStats {
+        uint64_t framesRendered = 0;   // 累计渲染帧数
+        float peakEver = 0.f;          // 历史最大绝对峰值
+        int callbacks = 0;             // 回调次数
+    };
+    AudioStats stats() const;
     float masterPeakL() const { return masterPeakL_.load(std::memory_order_relaxed); }
     float masterPeakR() const { return masterPeakR_.load(std::memory_order_relaxed); }
     void resetPeaks();
@@ -185,7 +199,12 @@ private:
 
     // 总线缓冲
     std::vector<float> busL_, busR_, revL_, revR_, dlyL_, dlyR_;
-    std::vector<float> outL_, outR_;   // 预分配的主输出，回调不分配内存
+    // 主输出缓冲：按 kMaxBlockFrames 一次性开足，之后永不重新分配。
+    // 之前 prepare() 里用 assign(n) 会重建容器，如果此时音频线程正在渲染，
+    // renderInterleaved 的 `outL_.size() < frames` 守卫会整块跳过 —— 每个回调都静默返回，
+    // 表现就是"点了播放没有声音，也不报错"。这是本文件里最危险的一处。
+    static constexpr int kMaxBlockFrames = 4096;
+    std::vector<float> outL_, outR_;
     EffectState reverbBus_, delayBus_;
 
     float masterVolume_ = 0.8f;
@@ -199,6 +218,10 @@ private:
     std::vector<float> trackPeakVec_;
 
     int lastBeat_ = -1;
+
+    std::atomic<uint64_t> framesRendered_{0};
+    std::atomic<float> peakEver_{0.f};
+    std::atomic<int> callbacks_{0};
     Noise masterNoise_;   // 抖动用的噪声（导出时可选）
 
     float* sampleData_ = nullptr;

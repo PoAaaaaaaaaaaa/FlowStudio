@@ -439,43 +439,20 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 崩溃日志全文，支持复制或分享给开发者。 */
+    /** 全量状态 + 崩溃日志，支持复制或分享给开发者。 */
     private fun showDiagnostics() {
         val app = application as FlowApp
+        val snapshot = com.volt.flowstudio.session.StatusSnapshot(session, this)
         val log = buildString {
-            appendLine("== 启动状态 ==")
-            appendLine(app.bootError ?: "正常")
-            appendLine()
-            appendLine("== 原生库 ==")
-            appendLine(NativeLib.status)
+            // 先给一页人能直接读的状态，这是"随时查看软件所有状态"的入口
+            appendLine(snapshot.humanReadable())
             appendLine()
 
-            // 音频链路自检：这几项直接决定"有没有声音"
-            appendLine("== 音频引擎 ==")
-            val dev = session.project
-            appendLine("引擎可用: ${session.engine.available}")
-            appendLine("音频流运行中: ${session.engine.isAudioRunning()}")
-            appendLine("采样率: ${session.engine.sampleRate().toInt()} Hz")
-            appendLine("轨道数: ${dev.tracks.size}")
-            appendLine("样式数: ${dev.patterns.size}")
-            appendLine("片段数: ${dev.clips.size}")
-            appendLine("总长度: ${dev.lengthBars()} 小节")
-            appendLine("节拍器: ${dev.metronomeVolume}")
-            appendLine("摇摆: ${(dev.swing * 100).toInt()}%")
-            appendLine()
-            appendLine("== 桥接 ==")
-            val br = session.bridge
-            if (br == null) {
-                appendLine("未启动")
-            } else {
-                appendLine("运行中: ${br.running}  端口: ${br.port}")
-                appendLine("引擎不可用: ${!session.engine.available}")
-                appendLine("令牌长度: ${br.token.length}")
+            if (app.bootError != null) {
+                appendLine("== 启动异常 ==")
+                appendLine(app.bootError)
+                appendLine()
             }
-            appendLine()
-            appendLine("== 导出目录 ==")
-            appendLine(session.exportDirHint())
-            appendLine()
             appendLine("== 崩溃日志 ==")
             appendLine(CrashGuard.fullLog(this@MainActivity))
         }

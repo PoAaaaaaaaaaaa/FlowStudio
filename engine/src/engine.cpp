@@ -38,13 +38,29 @@ void Engine::prepare(float sampleRate, int maxBlock) {
     sampleRate_ = sampleRate;
     maxBlock_ = std::max(64, maxBlock);
 
-    const size_t n = (size_t)maxBlock_;
-    busL_.assign(n, 0.f);
-    busR_.assign(n, 0.f);
-    revL_.assign(n, 0.f);
-    revR_.assign(n, 0.f);
-    dlyL_.assign(n, 0.f);
-    dlyR_.assign(n, 0.f);
+    // 所有总线缓冲一次开足到 kMaxBlockFrames，之后永不重建。
+    //
+    // 这里的尺寸必须和 renderInterleaved 的分段上限一致。
+    // 之前按 maxBlock_ 分配（比如 256），而渲染按 4096 循环写，
+    // 越界写会直接段错误 —— 或者更糟：踩坏别的字段但不崩，
+    // 表现成一堆莫名其妙的问题。
+    const size_t n = (size_t)kMaxBlockFrames;
+    if (busL_.size() < n) {
+        busL_.assign(n, 0.f);
+        busR_.assign(n, 0.f);
+        revL_.assign(n, 0.f);
+        revR_.assign(n, 0.f);
+        dlyL_.assign(n, 0.f);
+        dlyR_.assign(n, 0.f);
+    }
+
+    // 主输出缓冲：与总线同尺寸，也是一次性开足。
+    // 这一段之前漏掉了 —— outL_ 一直是空的，
+    // renderInterleaved 里 outL_.data() 拿到 nullptr，写进去就是段错误。
+    if (outL_.size() < n) {
+        outL_.assign(n, 0.f);
+        outR_.assign(n, 0.f);
+    }
 
     reverbBus_.type = EffectType::Reverb;
     reverbBus_.enabled = true;
@@ -261,6 +277,14 @@ void Engine::setMaster(float volume01, bool limiter, bool softClip, float gainDb
     masterGainDb_ = gainDb;
 }
 
+Engine::AudioStats Engine::stats() const {
+    AudioStats st;
+    st.framesRendered = framesRendered_.load(std::memory_order_relaxed);
+    st.peakEver = peakEver_.load(std::memory_order_relaxed);
+    st.callbacks = callbacks_.load(std::memory_order_relaxed);
+    return st;
+}
+
 float Engine::trackPeak(int index) const {
     if (index < 0 || index >= (int)trackPeakVec_.size()) return 0.f;
     return trackPeakVec_[(size_t)index];
@@ -338,8 +362,18 @@ void Engine::applyAutomation(int track, double tick, Channel& ch) {
 // ================================================================ 核心渲染
 
 void Engine::renderBlockClean(float* outL, float* outR, int frames) {
-    frames = std::min(frames, maxBlock_);
+    // 不再用 maxBlock_ 截断：调用方（renderInterleaved）已经按 kMaxBlockFrames
+    // 分好段了，这里再截一次会让实际输出的帧数比请求的少，
+    // 后面那段就是旧数据或者静音。块长以调用方为准。
     if (frames <= 0) return;
+    if (frames > kMaxBlockFrames) frames = kMaxBlockFrames;
+    // 缓冲尺寸必须够。宁可截断也不能越界写 —— 越界不会崩在当场，
+    // 而是悄悄改坏相邻字段，后面报出来的问题跟真正原因毫无关系。
+    const size_t need = (size_t)frames;
+    if (busL_.size() < need || outL_.size() < need || revL_.size() < need) {
+        frames = (int)std::min({busL_.size(), outL_.size(), revL_.size()});
+        if (frames <= 0) return;
+    }
 
     std::memset(revL_.data(), 0, sizeof(float) * (size_t)frames);
     std::memset(revR_.data(), 0, sizeof(float) * (size_t)frames);
@@ -528,6 +562,15 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
         if (pb > peakR) peakR = pb;
     }
 
+    // 诊断计数
+    framesRendered_.fetch_add((uint64_t)frames, std::memory_order_relaxed);
+    callbacks_.fetch_add(1, std::memory_order_relaxed);
+    {
+        const float now = std::max(peakL, peakR);
+        float prev = peakEver_.load(std::memory_order_relaxed);
+        if (now > prev) peakEver_.store(now, std::memory_order_relaxed);
+    }
+
     masterPeakL_.store(std::max(peakL, masterPeakL_.load(std::memory_order_relaxed) * 0.85f),
                        std::memory_order_relaxed);
     masterPeakR_.store(std::max(peakR, masterPeakR_.load(std::memory_order_relaxed) * 0.85f),
@@ -535,12 +578,21 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
 }
 
 void Engine::renderInterleaved(float* stereoOut, int frames) {
-    if (frames <= 0) return;
-    if ((int)outL_.size() < frames) return;   // prepare() 没按这个块长调过，直接静音跳过
-    renderBlockClean(outL_.data(), outR_.data(), frames);
-    for (int i = 0; i < frames; i++) {
-        stereoOut[i * 2] = outL_[(size_t)i];
-        stereoOut[i * 2 + 1] = outR_[(size_t)i];
+    if (frames <= 0 || !stereoOut) return;
+
+    // 分段渲染，绝不整块丢弃。
+    // 块长比缓冲大时（设备切换路由会改块长），以前是直接 return ——
+    // 一个静音块都不输出，而且没有任何日志。现在按上限切段处理。
+    int done = 0;
+    while (done < frames) {
+        const int n = std::min<int>(kMaxBlockFrames, frames - done);
+        renderBlockClean(outL_.data(), outR_.data(), n);
+        float* dst = stereoOut + (size_t)done * 2;
+        for (int i = 0; i < n; i++) {
+            dst[i * 2] = outL_[(size_t)i];
+            dst[i * 2 + 1] = outR_[(size_t)i];
+        }
+        done += n;
     }
 }
 

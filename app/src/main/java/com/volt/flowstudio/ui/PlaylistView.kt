@@ -159,24 +159,15 @@ class PlaylistView @JvmOverloads constructor(
             rect(canvas, l, t, r, bt, Palette.withAlpha(color, 55), dp(3f))
             outline(canvas, l, t, r, bt, Palette.withAlpha(color, 190), dp(3f), dp(1.2f))
 
+            // 片段内容：画成波形包络，而不是几条横线。
+            // FL 的片段一眼能看出"这段是密的还是疏的"，靠的就是这个。
+            // 我们按时间切片统计该片段的音符能量（数量 × 力度 × 时长），
+            // 归一后画成上下对称的包络。
             val pat = p.patternById(clip.patternId)
             if (pat != null) {
                 val notes = pat.notesOrNull(clip.track)
                 if (notes != null && notes.isNotEmpty()) {
-                    val pitches = notes.map { it.pitch }
-                    val minP = pitches.min(); val maxP = pitches.max().coerceAtLeast(minP + 1)
-                    val innerH = bt - t - dp(4f)
-                    for (n in notes) {
-                        val nx0 = tickToX(clip.start + n.start - clip.offset)
-                        val nx1 = tickToX(clip.start + n.start + n.length - clip.offset)
-                        if (nx1 < l || nx0 > r) continue
-                        val k = (n.pitch - minP).toFloat() / (maxP - minP)
-                        val ny = bt - dp(3f) - k * innerH
-                        rect(
-                            canvas, max(nx0, l), ny - dp(1.2f), min(nx1, r).coerceAtLeast(max(nx0, l) + dp(1f)), ny + dp(1.2f),
-                            Palette.withAlpha(color, 230)
-                        )
-                    }
+                    drawWaveform(canvas, clip, notes, l, r, t, bt, color)
                 }
             }
 
@@ -308,6 +299,80 @@ class PlaylistView @JvmOverloads constructor(
             }
         }
         return true
+    }
+
+    /**
+     * 把片段里的音符画成波形包络。
+     *
+     * 每个像素列统计落在这段时间里的音符：数量、力度、持续长度。
+     * 三者相乘近似"这一列的响度"，归一后画成上下对称的柱。
+     * 结果是：鼓 loop 看起来是一串均匀的脉冲，和弦铺底是一条厚实的带子，
+     * 稀疏的旋律是几个孤立的峰 —— 跟 FL 里的观感一致。
+     */
+    private fun drawWaveform(
+        canvas: Canvas,
+        clip: Clip,
+        notes: List<Note>,
+        l: Float, r: Float, top: Float, bottom: Float,
+        color: Int
+    ) {
+        val w = r - l
+        if (w <= 2f) return
+
+        val cols = w.toInt().coerceAtMost(600)
+        if (cols <= 0) return
+        val energy = FloatArray(cols)
+
+        val clipStartTick = clip.start
+        val clipEndTick = clip.end
+        val innerH = (bottom - top) - dp(6f)
+        if (innerH <= 0f) return
+
+        for (n in notes) {
+            // 音符在时间线上的绝对区间
+            val nAbsStart = clipStartTick + n.start - clip.offset
+            val nAbsEnd = nAbsStart + n.length
+            if (nAbsEnd <= clipStartTick || nAbsStart >= clipEndTick) continue
+
+            // 映射到像素列
+            val c0 = ((maxOf(nAbsStart, clipStartTick) - clipStartTick).toFloat() /
+                    (clipEndTick - clipStartTick) * cols).toInt().coerceIn(0, cols - 1)
+            val c1 = ((minOf(nAbsEnd, clipEndTick) - clipStartTick).toFloat() /
+                    (clipEndTick - clipStartTick) * cols).toInt().coerceIn(0, cols - 1)
+
+            // 单音的"响度"：力度归一，长度的贡献开方衰减（长音不该压过重音）
+            val amp = (n.velocity / 127f) * (0.6f + 0.4f * kotlin.math.sqrt(n.length / Note.PPQ.toFloat()))
+            for (c in c0..c1) {
+                // 起音处更强，尾音渐弱 —— 模拟真实波形包络
+                val posInNote = if (c1 > c0) (c - c0).toFloat() / (c1 - c0) else 0f
+                val decay = 1f - 0.45f * posInNote
+                val v = amp * decay
+                if (v > energy[c]) energy[c] = v
+            }
+        }
+
+        // 归一
+        var maxE = 0f
+        for (v in energy) if (v > maxE) maxE = v
+        if (maxE < 0.001f) return
+
+        val mid = (top + bottom) / 2f
+        val halfH = innerH / 2f
+
+        b.fill.color = Palette.withAlpha(color, 235)
+        b.fill.style = Paint.Style.FILL
+
+        for (c in 0 until cols) {
+            val e = energy[c] / maxE
+            if (e < 0.01f) continue
+            val h = halfH * e
+            val x = l + c.toFloat()
+            // 上下对称画，像波形
+            canvas.drawRect(x, mid - h, x + 1.2f, mid + h, b.fill)
+        }
+
+        // 中线
+        line(canvas, l, mid, r, mid, Palette.withAlpha(Palette.BG, 70), dp(0.8f))
     }
 
     fun scrollByX(px: Float) {

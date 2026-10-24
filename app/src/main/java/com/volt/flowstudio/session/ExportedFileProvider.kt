@@ -29,8 +29,38 @@ class ExportedFileProvider : ContentProvider() {
                 .appendPath(file.name)
                 .build()
 
-        private fun dirOf(context: Context): File =
-            File(context.getExternalFilesDir(null) ?: context.filesDir, "exports")
+        /**
+         * 可能存放导出文件的所有目录。
+         *
+         * 导出时会按 公共 Music → 外部私有 → 内部私有 逐级回退，
+         * 所以这里必须把三处都算上。之前只写了 exports 一处，
+         * 结果文件明明在 Music/FlowStudio 里，分享却报"文件不存在"。
+         */
+        fun candidateDirs(context: Context): List<File> = listOfNotNull(
+            runCatching {
+                File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_MUSIC
+                    ),
+                    "FlowStudio"
+                )
+            }.getOrNull(),
+            runCatching { File(context.getExternalFilesDir(null), "exports") }.getOrNull(),
+            File(context.filesDir, "exports")
+        )
+
+        /** 在所有候选目录里找这个文件名 */
+        fun resolve(context: Context, name: String): File? {
+            // 挡路径穿越：只接受纯文件名
+            if (name.isEmpty() || name.contains('/') || name.contains("\\") || name.contains("..")) {
+                return null
+            }
+            for (dir in candidateDirs(context)) {
+                val f = File(dir, name)
+                if (f.isFile) return f
+            }
+            return null
+        }
     }
 
     override fun onCreate(): Boolean = true
@@ -41,8 +71,7 @@ class ExportedFileProvider : ContentProvider() {
     ): Cursor? {
         val ctx = context ?: return null
         val name = uri.lastPathSegment ?: return null
-        val file = File(dirOf(ctx), name)
-        if (!file.isFile) return null
+        val file = resolve(ctx, name) ?: return null
         val cols = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         val row = arrayOfNulls<Any>(cols.size)
         cols.forEachIndexed { i, c ->
@@ -59,10 +88,8 @@ class ExportedFileProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         val ctx = context ?: throw FileNotFoundException("无上下文")
         val name = uri.lastPathSegment ?: throw FileNotFoundException("无文件名")
-        // 只允许访问导出目录里真实存在的文件，挡住路径穿越
-        if (name.contains('/') || name.contains("..")) throw FileNotFoundException("非法路径")
-        val file = File(dirOf(ctx), name)
-        if (!file.isFile) throw FileNotFoundException(name)
+        // resolve 内部会挡路径穿越，并且覆盖三个候选目录
+        val file = resolve(ctx, name) ?: throw FileNotFoundException(name)
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 

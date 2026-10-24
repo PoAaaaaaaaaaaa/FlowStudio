@@ -72,6 +72,16 @@ class NativeEngine private constructor() {
     fun isAudioRunning(): Boolean = handle != 0L && nativeIsAudioRunning(handle)
     fun sampleRate(): Float = if (handle != 0L) nativeSampleRate(handle) else 48000f
 
+    /** 音频渲染统计。用来区分"没起来""起来了但是静音""有声但设备不响"。 */
+    data class Stats(val framesRendered: Long, val peakEver: Float, val callbacks: Int)
+
+    fun stats(): Stats {
+        if (handle == 0L) return Stats(0, 0f, 0)
+        val v = nativeStats(handle) ?: return Stats(0, 0f, 0)
+        if (v.size < 3) return Stats(0, 0f, 0)
+        return Stats(v[0], v[1] / 1_000_000f, v[2].toInt())
+    }
+
     fun play() = withHandle { nativePlay(it) }
     fun pause() = withHandle { nativePause(it) }
     fun stop() = withHandle { nativeStop(it) }
@@ -147,6 +157,7 @@ class NativeEngine private constructor() {
     private external fun nativeStopAudio(handle: Long)
     private external fun nativeIsAudioRunning(handle: Long): Boolean
     private external fun nativeSampleRate(handle: Long): Float
+    private external fun nativeStats(handle: Long): LongArray?
     private external fun nativePlay(handle: Long)
     private external fun nativePause(handle: Long)
     private external fun nativeStop(handle: Long)
