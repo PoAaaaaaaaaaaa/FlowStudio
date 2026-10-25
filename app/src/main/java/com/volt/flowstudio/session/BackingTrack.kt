@@ -2,6 +2,7 @@ package com.volt.flowstudio.session
 
 import android.content.Context
 import com.volt.flowstudio.audio.NativeEngine
+import com.volt.flowstudio.model.Project
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -29,7 +30,7 @@ class BackingTrack(private val context: Context) {
         private set
     var sampleRate: Int = 44100
         private set
-    var gain: Float = 1f
+    var gain: Float = 0.85f
         private set
     var muted: Boolean = false
         private set
@@ -40,17 +41,28 @@ class BackingTrack(private val context: Context) {
 
     fun dir(): File = File(context.filesDir, "backing").apply { mkdirs() }
 
-    /** 导入一个音频文件并立刻推给引擎。回调在主线程之外的池线程。 */
-    fun import(src: File, onDone: ((Boolean, String) -> Unit)? = null) {
+    /**
+     * 导入一个音频文件并立刻推给引擎。
+     *
+     * projectKey 必须是稳定的工程标识（这里用工程文件名），
+     * 不能用显示名——用户改名后就会找不到伴奏。
+     */
+    fun import(projectKey: String, src: File, onDone: ((Boolean, String) -> Unit)? = null) {
         io.execute {
             val parsed = runCatching { decode(src) }.getOrNull()
             if (parsed == null) {
                 onDone?.invoke(false, "无法解码这个音频：只支持 PCM WAV（16/24/32-bit 或 float）")
                 return@execute
             }
-            val target = File(dir(), "backing.wav")
-            runCatching { src.copyTo(target, overwrite = true) }
-            fileName = target.name
+            val target = File(dir(), safeName(projectKey) + ".wav")
+            val copied = runCatching {
+                src.inputStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+            }.isSuccess
+            if (!copied) {
+                onDone?.invoke(false, "伴奏文件保存失败")
+                return@execute
+            }
+            fileName = src.name
             frames = parsed.frames
             sampleRate = parsed.sampleRate
             computePeaks(parsed.samples, parsed.frames)
@@ -59,13 +71,21 @@ class BackingTrack(private val context: Context) {
         }
     }
 
-    /** 从工程目录恢复上次使用的伴奏。 */
-    fun restore(onDone: ((Boolean) -> Unit)? = null) {
+    /** 按稳定的工程键恢复伴奏；找不到就明确清除，禁止串用上一个工程。 */
+    fun restore(projectKey: String, onDone: ((Boolean) -> Unit)? = null) {
         io.execute {
-            val f = File(dir(), "backing.wav")
-            if (!f.isFile) { onDone?.invoke(false); return@execute }
+            val f = File(dir(), safeName(projectKey) + ".wav")
+            if (!f.isFile) {
+                clear()
+                onDone?.invoke(false)
+                return@execute
+            }
             val parsed = runCatching { decode(f) }.getOrNull()
-            if (parsed == null) { onDone?.invoke(false); return@execute }
+            if (parsed == null) {
+                clear()
+                onDone?.invoke(false)
+                return@execute
+            }
             fileName = f.name
             frames = parsed.frames
             sampleRate = parsed.sampleRate
@@ -75,6 +95,22 @@ class BackingTrack(private val context: Context) {
         }
     }
 
+    /** 工程被替换后重置状态，避免旧伴奏的标题、波形与声音留在新工程。 */
+    fun reset() {
+        clear()
+        fileName = ""
+        gain = 0.85f
+        muted = false
+        startTick = 0
+    }
+
+    /** 文件名安全化并附加短哈希，避免不同中文工程名压成同一个下划线串。 */
+    private fun safeName(name: String): String {
+        val cleaned = name.trim().replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "project" }
+        val hash = name.hashCode().toUInt().toString(16).take(8)
+        return "${cleaned.take(48)}_$hash"
+    }
+
     fun clear() {
         fileName = ""
         frames = 0
@@ -82,18 +118,28 @@ class BackingTrack(private val context: Context) {
         NativeEngine.instance.clearBackingTrack()
     }
 
-    fun setGain(value: Float) {
+    fun applySettings(start: Int, gain01: Float, mutedFlag: Boolean) {
+        startTick = start.coerceAtLeast(0)
+        gain = gain01.coerceIn(0f, 1.5f)
+        muted = mutedFlag
+        NativeEngine.instance.setBackingGain(gain, muted)
+    }
+
+    fun setGain(value: Float, project: Project? = null) {
         gain = value.coerceIn(0f, 1.5f)
+        project?.backingGain = gain
         NativeEngine.instance.setBackingGain(gain, muted)
     }
 
-    fun setMuted(value: Boolean) {
+    fun setMuted(value: Boolean, project: Project? = null) {
         muted = value
+        project?.backingMuted = muted
         NativeEngine.instance.setBackingGain(gain, muted)
     }
 
-    fun setStartTick(tick: Int) {
+    fun setStartTick(tick: Int, project: Project? = null) {
         startTick = tick.coerceAtLeast(0)
+        project?.backingStartTick = startTick
         if (loaded) pushToEngine()
     }
 

@@ -24,6 +24,8 @@ class StudioSession(private val context: Context) {
         private set
 
     var currentFile: File? = null
+    /** 未保存工程的临时稳定键；新建时换一个，保证伴奏不会串到下一个工程。 */
+    private var unsavedKey: String = "unsaved-" + System.nanoTime().toString(16)
         private set
 
     val engine = NativeEngine.instance
@@ -48,6 +50,9 @@ class StudioSession(private val context: Context) {
 
     /** 外部（插件/桥接）改完工程后触发，让界面立即重绘，而不是等用户切页签。 */
     var onExternalEdit: ((String) -> Unit)? = null
+
+    /** 伴奏状态变化（导入/恢复/清除/调参）后触发，让界面刷新波形。 */
+    var onBackingChanged: (() -> Unit)? = null
 
     /** 最近一次 AI 写入前的工程快照，供一键撤销。 */
     private var undoSnapshot: String? = null
@@ -97,6 +102,7 @@ class StudioSession(private val context: Context) {
             engine.prepare(48000, 256)
             reloadLastOrDefault()
             pushAll()
+            restoreBacking()
             engine.setMaster(
                 project.masterVolume / 100f,
                 project.masterLimiter,
@@ -291,9 +297,9 @@ class StudioSession(private val context: Context) {
                     currentFile = file
                     stopPlayback()
                     pushAll()
+                    restoreBacking()
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         .edit().putString(KEY_LAST, file.absolutePath).apply()
-                    backing.restore()
                     onLoaded?.invoke(proj)
                     onDone?.invoke(true)
                 }
@@ -321,7 +327,9 @@ class StudioSession(private val context: Context) {
                 stopPlayback()
                 project = incoming
                 currentFile = null
+                backing.reset()
                 pushAll()
+                restoreBacking()
                 onLoaded?.invoke(project)
                 if (wasPlaying) play()
                 scheduleAutoSave()
@@ -373,8 +381,55 @@ class StudioSession(private val context: Context) {
             patterns.add(Pattern(nextPatternId++, "样式 0", 2))
         }
         currentFile = null
+        unsavedKey = "unsaved-" + System.nanoTime().toString(16)
+        // 新工程不继承任何伴奏：reset 后不要再调用 restoreBacking，
+        // 否则同名文件会被重新加载，用户会以为"新建的工程还带着上一首"。
+        backing.reset()
         pushAll()
         onLoaded?.invoke(project)
+    }
+
+    /** 统一同步工程的伴奏文件与播放参数，防止界面、存档与引擎状态分裂。 */
+    fun restoreBacking() {
+        val p = project
+        backing.applySettings(p.backingStartTick, p.backingGain, p.backingMuted)
+        // 旧工程没有 backingFile 时不主动恢复同名残留，避免同名工程串音。
+        if (p.backingFile.isBlank()) {
+            backing.reset()
+            return
+        }
+        backing.restore(projectKey()) { ok ->
+            if (ok) main.post { onBackingChanged?.invoke() }
+        }
+    }
+
+    /**
+     * 稳定的工程键：优先用工程文件，未保存时退回工程名。
+     * 不能直接用显示名，否则用户改一次名伴奏就丢失。
+     */
+    private fun projectKey(): String =
+        currentFile?.nameWithoutExtension ?: unsavedKey
+
+    fun importBacking(src: File, onDone: ((Boolean, String) -> Unit)? = null) {
+        backing.import(projectKey(), src) { ok, message ->
+            if (ok) {
+                project.backingFile = backing.fileName
+                project.backingGain = backing.gain
+                project.backingStartTick = backing.startTick
+                scheduleAutoSave()
+            }
+            main.post {
+                if (ok) onBackingChanged?.invoke()
+                onDone?.invoke(ok, message)
+            }
+        }
+    }
+
+    fun clearBacking() {
+        backing.clear()
+        project.backingFile = ""
+        scheduleAutoSave()
+        onBackingChanged?.invoke()
     }
 
     private fun reloadLastOrDefault() {

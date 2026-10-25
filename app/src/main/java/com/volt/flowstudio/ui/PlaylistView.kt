@@ -31,6 +31,15 @@ class PlaylistView @JvmOverloads constructor(
 
     var pixelsPerBar: Float = 0f     // 0 = 自动铺满
 
+    /** 伴奏波形快照；由 MainActivity 在刷新时绑定。 */
+    var backingName: String = ""
+    var backingPeaks: FloatArray = FloatArray(0)
+    var backingStartTick: Int = 0
+    var backingLengthTicks: Int = 0
+
+    /** 点击伴奏条：打开伴奏设置。 */
+    var onBackingTap: (() -> Unit)? = null
+
     var loopOn: Boolean = false
     var loopStart: Int = 0
     var loopEnd: Int = Note.BAR * 8
@@ -185,6 +194,63 @@ class PlaylistView @JvmOverloads constructor(
             rect(canvas, r - dp(3.5f), t + dp(2f), r, bt - dp(2f), Palette.withAlpha(Palette.BG, 120))
         }
 
+        // 没有伴奏时给一个明确的入口条，而不是让用户猜去哪里导入。
+        if (backingLengthTicks <= 0) {
+            val promptTop = rulerHeight + tracks.coerceAtLeast(1) * rowHeight - scrollY + dp(2f)
+            val promptBottom = promptTop + dp(34f)
+            if (promptBottom > rulerHeight && promptTop < h) {
+                val left = headerWidth + dp(8f)
+                val right = min(w - dp(8f), left + dp(220f))
+                rect(canvas, left, promptTop, right, promptBottom,
+                    Palette.withAlpha(Palette.CYAN, 26), dp(6f))
+                outline(canvas, left, promptTop, right, promptBottom,
+                    Palette.withAlpha(Palette.CYAN, 120), dp(6f), dp(1f))
+                label(canvas, "+ 导入伴奏音频（WAV）", left + dp(10f),
+                    promptTop + dp(21f), Palette.CYAN, sp(9.5f), bold = true)
+            }
+        }
+
+        // ---- 伴奏音频轨 ----
+        // 音乐片段与真实音频叠在同一时间轴，才能看出"伴奏从哪里进"。
+        val backingTop = rulerHeight + tracks * rowHeight - scrollY
+        val backingH = if (backingLengthTicks > 0) dp(72f) else dp(40f)
+        val backingBottom = backingTop + backingH
+        if (backingBottom > rulerHeight && backingTop < h) {
+            rect(canvas, 0f, backingTop, w, backingBottom, Palette.withAlpha(Palette.CYAN, 14))
+            rect(canvas, 0f, backingTop, headerWidth, backingBottom, Palette.SURFACE)
+            val labelText = if (backingLengthTicks > 0) backingName.ifBlank { "伴奏" } else "伴奏 · 未导入"
+            label(canvas, clipText(labelText, headerWidth - dp(10f), sp(9f), true),
+                dp(5f), backingTop + dp(16f), Palette.CYAN, sp(9f), bold = true)
+            label(canvas, if (backingLengthTicks > 0) "音频轨" else "点 + 导入",
+                dp(5f), backingTop + dp(28f), Palette.TEXT_FAINT, sp(8f))
+            line(canvas, 0f, backingBottom, w, backingBottom, Palette.LINE_SOFT, dp(1f))
+
+            if (backingLengthTicks > 0) {
+                val x0 = max(tickToX(backingStartTick), headerWidth)
+                val x1 = min(tickToX(backingStartTick + backingLengthTicks), w)
+                if (x1 > x0) {
+                    val t = backingTop + dp(4f)
+                    val bt = backingBottom - dp(4f)
+                    rect(canvas, x0, t, x1, bt, Palette.withAlpha(Palette.CYAN, 30), dp(4f))
+                    outline(canvas, x0, t, x1, bt, Palette.withAlpha(Palette.CYAN, 130), dp(4f), dp(1f))
+                    if (backingPeaks.isNotEmpty()) {
+                        val mid = (t + bt) / 2f
+                        val half = (bt - t) / 2f * 0.86f
+                        val cols = (x1 - x0).toInt().coerceAtMost(1200)
+                        b.fill.style = Paint.Style.FILL
+                        b.fill.color = Palette.withAlpha(Palette.CYAN, 200)
+                        for (c in 0 until cols) {
+                            val idx = (c.toFloat() / cols * (backingPeaks.size - 1)).toInt()
+                                .coerceIn(0, backingPeaks.size - 1)
+                            val amp = backingPeaks[idx].coerceIn(0f, 1f) * half
+                            val x = x0 + c
+                            if (amp >= 0.5f) canvas.drawRect(x, mid - amp, x + 1f, mid + amp, b.fill)
+                        }
+                    }
+                }
+            }
+        }
+
         // ---- 播放头 ----
         val px = tickToX(playheadTick)
         if (px in headerWidth..w) {
@@ -227,12 +293,28 @@ class PlaylistView @JvmOverloads constructor(
 
                 // 轨道头
                 if (e.x < headerWidth) {
+                    // 伴奏轨头：点开伴奏设置，而不是误选最后一条音轨。
+                    val backingTop = rulerHeight + p.tracks.size.coerceAtLeast(1) * rowHeight - scrollY
+                    if (e.y >= backingTop) {
+                        onBackingTap?.invoke()
+                        return true
+                    }
                     val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
                     if (row in p.tracks.indices) {
                         onSelectTrack?.invoke(row)
                         invalidate()
                     }
                     return true
+                }
+
+                // 空态提示条优先：它在轨道区下方，不能按行号算。
+                if (backingLengthTicks <= 0) {
+                    val trackCount = p.tracks.size.coerceAtLeast(1)
+                    val promptTop = rulerHeight + trackCount * rowHeight - scrollY + dp(2f)
+                    if (e.y in promptTop..(promptTop + dp(34f))) {
+                        onBackingTap?.invoke()
+                        return true
+                    }
                 }
 
                 // 找片段
@@ -273,7 +355,8 @@ class PlaylistView @JvmOverloads constructor(
                         val mx = if (e.pointerCount >= 2) (e.getX(0) + e.getX(1)) / 2f else e.x
                         val my = if (e.pointerCount >= 2) (e.getY(0) + e.getY(1)) / 2f else e.y
                         scrollX = (scrollX - (mx - panX)).coerceAtLeast(0f)
-                        val contentH = p.tracks.size.coerceAtLeast(1) * rowHeight
+                        val laneH = if (backingLengthTicks > 0) dp(72f) else dp(40f)
+                        val contentH = p.tracks.size.coerceAtLeast(1) * rowHeight + laneH
                         scrollY = (scrollY - (my - panY)).coerceIn(0f, max(0f, contentH - height + rulerHeight))
                         panX = mx
                         panY = my

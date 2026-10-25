@@ -310,6 +310,7 @@ class StudioBridge(
 
             var contentLength = 0
             var authHeader: String? = null
+            var tooLarge = false
             while (true) {
                 val line = input.readLine() ?: break
                 if (line.isEmpty()) break
@@ -317,9 +318,18 @@ class StudioBridge(
                 if (idx > 0) {
                     val k = line.substring(0, idx).trim().lowercase()
                     val v = line.substring(idx + 1).trim()
-                    if (k == "content-length") contentLength = v.toIntOrNull() ?: 0
+                    if (k == "content-length") {
+                        contentLength = v.toIntOrNull() ?: 0
+                        // 上限 64 MB：足够 5 分钟 44.1kHz 双声道 WAV，也挡住内存炸弹。
+                        if (contentLength > 64 * 1024 * 1024) tooLarge = true
+                    }
                     if (k == "authorization") authHeader = v
                 }
+            }
+
+            if (tooLarge) {
+                respond(client.getOutputStream(), 413, JSONObject().put("error", "请求体过大（上限 64 MB）"))
+                return false
             }
 
             val body = if (contentLength > 0) {
@@ -538,6 +548,13 @@ class StudioBridge(
                 method == "POST" && path == "/notes/transform" -> handleNotesTransform(body)
                 // 试听某个音符（不写入，只发声）
                 method == "POST" && path == "/audition" -> handleAudition(body)
+                method == "GET" && path == "/backing" -> 200 to backingJson()
+                method == "POST" && path == "/backing/import" -> handleBackingImport(body)
+                method == "POST" && path == "/backing/settings" -> handleBackingSettings(body)
+                method == "POST" && path == "/backing/clear" -> {
+                    runOnMain { session.clearBacking() }
+                    200 to backingJson()
+                }
                 method == "POST" && path == "/clips" -> handleAddClip(body)
                 method == "DELETE" && path.startsWith("/clips/") ->
                     handleDeleteClip(path.removePrefix("/clips/").toIntOrNull())
@@ -1138,6 +1155,84 @@ class StudioBridge(
         val dur = o.optInt("duration", Note.STEP * 4)
         runOnMain { session.previewNote(trackIdx, pitch, vel, dur) }
         return 200 to JSONObject().put("ok", true).put("pitch", pitch)
+    }
+
+    /** 伴奏状态：时长按当前 BPM 换算成 tick，插件可直接排结构。 */
+    private fun backingJson(): JSONObject {
+        val b = session.backing
+        val p = session.project
+        val seconds = if (b.sampleRate > 0) b.frames.toDouble() / b.sampleRate else 0.0
+        val lengthTicks = (seconds * p.bpm / 60.0 * Note.PPQ).toInt()
+        return JSONObject()
+            .put("ok", true)
+            .put("loaded", b.loaded)
+            .put("name", b.fileName)
+            .put("frames", b.frames)
+            .put("sampleRate", b.sampleRate)
+            .put("durationSec", seconds)
+            .put("startTick", b.startTick)
+            .put("lengthTicks", lengthTicks)
+            .put("gain", b.gain.toDouble())
+            .put("muted", b.muted)
+    }
+
+    /**
+     * 直接接收 WAV 字节并导入为伴奏。
+     * base64 解码后写临时文件，走与界面完全相同的解码与校验路径，
+     * 不新增第二套音频解析逻辑。
+     */
+    private fun handleBackingImport(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val b64 = o.optString("wavBase64", "")
+        if (b64.length < 64) return 400 to JSONObject().put("error", "需要 wavBase64")
+        val raw = runCatching { android.util.Base64.decode(b64, android.util.Base64.DEFAULT) }.getOrNull()
+            ?: return 400 to JSONObject().put("error", "wavBase64 解码失败")
+        if (raw.size < 64) return 400 to JSONObject().put("error", "音频数据为空")
+        if (raw.size > 48 * 1024 * 1024) return 413 to JSONObject().put("error", "音频过大（上限 48 MB）")
+        val tmp = File(session.appContext().cacheDir, "bridge-backing-import.wav")
+        val written = runCatching { tmp.writeBytes(raw) }.isSuccess
+        if (!written) return 500 to JSONObject().put("error", "无法写入临时文件")
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var ok = false
+        var msg = ""
+        session.importBacking(tmp) { success, message ->
+            ok = success
+            msg = message
+            latch.countDown()
+        }
+        val finished = latch.await(20, java.util.concurrent.TimeUnit.SECONDS)
+        if (!finished) return 504 to JSONObject().put("error", "导入超时（音频可能过长）")
+        if (!ok) return 400 to JSONObject().put("error", msg)
+        val p = o.optInt("startTick", Int.MIN_VALUE)
+        if (p != Int.MIN_VALUE) {
+            runOnMain { session.backing.setStartTick(p.coerceAtLeast(0), session.project); session.scheduleAutoSave() }
+        }
+        if (o.has("gain")) {
+            val g = o.optDouble("gain", 0.85).toFloat()
+            runOnMain { session.backing.setGain(g, session.project); session.scheduleAutoSave() }
+        }
+        if (o.has("muted")) {
+            val m = o.optBoolean("muted", false)
+            runOnMain { session.backing.setMuted(m, session.project); session.scheduleAutoSave() }
+        }
+        bumpRevision()
+        session.notifyExternalEdit("导入伴奏")
+        return 200 to backingJson().put("message", msg)
+    }
+
+    private fun handleBackingSettings(body: String): Pair<Int, JSONObject> {
+        val o = JSONObject(body)
+        val ok = runOnMain {
+            if (o.has("gain")) session.backing.setGain(o.optDouble("gain", 0.85).toFloat(), session.project)
+            if (o.has("muted")) session.backing.setMuted(o.optBoolean("muted", false), session.project)
+            if (o.has("startTick")) session.backing.setStartTick(o.optInt("startTick", 0), session.project)
+            session.scheduleAutoSave()
+        }
+        if (!ok) return 503 to JSONObject().put("error", "应用繁忙")
+        bumpRevision()
+        session.notifyExternalEdit("调整伴奏")
+        return 200 to backingJson()
     }
 
     private fun handleAddClip(body: String): Pair<Int, JSONObject> {

@@ -20,6 +20,7 @@ class NavPanelView(
     private val titles: List<String>,
     private val hints: List<String>,
     private val selected: Int,
+    private val pageCount: Int = titles.size,
     private val onPick: (Int) -> Unit
 ) : BaseView(context, attrs = null) {
 
@@ -44,7 +45,9 @@ class NavPanelView(
 
         titles.indices.forEach { i ->
             val top = startY + i * itemH
-            val isSel = i == selected
+            // 只有页面项有"当前"状态；导入/指南是动作，不存在选中。
+            val isSel = i == selected && i < pageCount
+            val isAction = i >= pageCount
             if (isSel || pressed == i) {
                 rect(canvas, dp(8f), top + dp(3f), w - dp(8f), top + itemH - dp(3f),
                     if (isSel) Palette.withAlpha(Palette.ACCENT, 26) else Palette.PANEL_HI, dp(9f))
@@ -67,9 +70,18 @@ class NavPanelView(
             }
 
             label(canvas, titles[i], dp(52f), top + itemH * 0.42f,
-                if (isSel) Palette.ACCENT else Palette.TEXT, sp(12.5f), bold = isSel)
+                when {
+                    isSel -> Palette.ACCENT
+                    isAction -> Palette.CYAN
+                    else -> Palette.TEXT
+                }, sp(12.5f), bold = isSel)
             label(canvas, hints.getOrElse(i) { "" }, dp(52f), top + itemH * 0.75f,
                 Palette.TEXT_FAINT, sp(8.5f))
+            if (isAction && i == pageCount) {
+                // 动作项之间加一条细分隔，避免和页面混在一起
+                line(canvas, dp(52f), top - dp(1f), w - dp(18f), top - dp(1f),
+                    Palette.LINE_SOFT, dp(0.8f))
+            }
 
             if (isSel) {
                 val px = w - dp(26f)

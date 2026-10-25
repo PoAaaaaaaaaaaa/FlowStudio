@@ -22,6 +22,12 @@ class Project {
     /** 摇摆量 0..1，0 是正拍。0.5 大约是三连音的摇摆感。 */
     var swing: Float = 0f
 
+    /** 伴奏引用与播放设置。只存路径与参数，音频本体不入 JSON。 */
+    var backingFile: String = ""
+    var backingStartTick: Int = 0
+    var backingGain: Float = 0.85f
+    var backingMuted: Boolean = false
+
     /** 节拍器音量 0..1 */
     var metronomeVolume: Float = 0.6f
 
@@ -222,6 +228,10 @@ class Project {
         put("keyRoot", keyRoot)
         put("scaleName", scaleName)
         put("swing", swing.toDouble())
+        put("backingFile", backingFile)
+        put("backingStartTick", backingStartTick)
+        put("backingGain", backingGain.toDouble())
+        put("backingMuted", backingMuted)
         put("metronomeVolume", metronomeVolume.toDouble())
         put("masterVolume", masterVolume)
         put("masterLimiter", masterLimiter)
@@ -253,6 +263,10 @@ class Project {
             p.keyRoot = o.optString("keyRoot", "C")
             p.scaleName = o.optString("scaleName", "chromatic")
             p.swing = o.optDouble("swing", 0.0).toFloat().coerceIn(0f, 1f)
+            p.backingFile = o.optString("backingFile", "")
+            p.backingStartTick = o.optInt("backingStartTick", 0).coerceAtLeast(0)
+            p.backingGain = o.optDouble("backingGain", 0.85).toFloat().coerceIn(0f, 1.5f)
+            p.backingMuted = o.optBoolean("backingMuted", false)
             p.metronomeVolume = o.optDouble("metronomeVolume", 0.6).toFloat().coerceIn(0f, 1f)
             p.masterVolume = o.optInt("masterVolume", 80).coerceIn(0, 100)
             p.masterLimiter = o.optBoolean("masterLimiter", true)

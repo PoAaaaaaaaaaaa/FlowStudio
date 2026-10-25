@@ -157,7 +157,7 @@ public:
     void setBackingTrack(const float* interleaved, int frames, int sampleRate,
                          double startTick, float gain);
     void clearBackingTrack();
-    bool hasBackingTrack() const { return backingFrames_ > 0; }
+    bool hasBackingTrack() const { return std::atomic_load(&backingBuffer_) != nullptr; }
     void setBackingTrackGain(float gain01) { backingGain_.store(gain01); }
     void setBackingTrackMute(bool mute) { backingMute_.store(mute); }
 
@@ -240,17 +240,18 @@ private:
     int sampleRateRoot_ = 48000;
     int sampleRoot_ = 60;
 
-    // 伴奏轨：预分配、音频线程只读。切换时用原子指针交换，避免撕裂。
-    float* backingData_ = nullptr;      // 交织立体声
-    int backingFrames_ = 0;
-    int backingSampleRate_ = 48000;
-    double backingStartTick_ = 0.0;
-    std::atomic<float> backingGain_{1.f};
+    // 伴奏轨：不可变快照。音频回调原子取得 shared_ptr，保证整块生命周期。
+    struct BackingBuffer {
+        std::vector<float> samples;  // 交织立体声
+        int frames = 0;
+        int sampleRate = 48000;
+        double startTick = 0.0;
+    };
+    std::shared_ptr<const BackingBuffer> backingBuffer_;
+    std::atomic<float> backingGain_{0.85f};
     std::atomic<bool> backingMute_{false};
-    /** 伴奏读取位置（秒），由工程位置换算，暂停时也要能对齐。 */
     std::atomic<double> backingCursor_{0.0};
     std::atomic<bool> backingSeek_{true};
 };
 
 }  // namespace flow
-

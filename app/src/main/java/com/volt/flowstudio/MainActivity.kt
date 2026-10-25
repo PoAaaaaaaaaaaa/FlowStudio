@@ -28,14 +28,11 @@ class MainActivity : Activity() {
     private lateinit var transportBar: TransportBar
     private var tabBar: TabBar? = null
     private lateinit var content: FrameLayout
-    private lateinit var steps: StepSequencerView
     private lateinit var piano: PianoRollView
     private lateinit var playlist: PlaylistView
     private lateinit var mixer: MixerView
-    private lateinit var auto: AutomationView
     private lateinit var keys: KeyboardView
     private lateinit var rack: ChannelRackView
-    private lateinit var timeline: AudioTimelineView
     private lateinit var banner: android.widget.TextView
     private var aiBanner: FlowButton? = null
     private var currentDialog: android.app.Dialog? = null
@@ -47,7 +44,6 @@ class MainActivity : Activity() {
     private var contentView: FrameLayout? = null
     private var tabBarView: TabBar? = null
     private var transportBarView: TransportBar? = null
-    private var footerBar: FlowButton? = null
     private var insetTop = 0
     private var insetBottom = 0
     private var keyboardHeight = 0
@@ -63,15 +59,12 @@ class MainActivity : Activity() {
     private var navSubtitle: TextView? = null
     private var navProgress: TextView? = null
     private var navSheet: android.app.Dialog? = null
-    private val tabTitles = listOf("时间线", "机架", "步进", "卷帘", "编排", "混音", "自动化")
+    private val tabTitles = listOf("编排", "机架", "卷帘", "混音")
     private val tabHints = listOf(
-        "音频波形 · 点轨道头设置",
-        "点格子写音 · 长按通道管理",
-        "16 格步进编辑",
+        "片段与伴奏 · 点标尺定位",
+        "音符与通道 · 点格子写音",
         "钢琴卷帘 · 双指缩放",
-        "时间线编排 · 标尺划循环",
-        "混音台 · 推子与效果",
-        "自动化曲线"
+        "混音台 · 推子与效果"
     )
 
     private val ticker = object : Runnable {
@@ -185,7 +178,6 @@ class MainActivity : Activity() {
 
         val tabH = dp(if (compactLandscape) 42 else if (portrait) 48 else 44)
         val transportH = dp(if (compactLandscape) 52 else if (portrait) 58 else 54)
-        val footerH = dp(if (compactLandscape) 20 else 22)
         keyboardHeight = dp(if (hDp < 700f) 76 else 92)
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
 
@@ -282,18 +274,7 @@ class MainActivity : Activity() {
             android.widget.LinearLayout.LayoutParams.MATCH_PARENT, transportH
         ))
 
-        // ---- 4. 说明条 ----
-        footerBar = FlowButton(this).apply {
-            text = "手势与操作指南  ·  FlowStudio 1.17"
-            textSize = 9f
-            setPadding(dp(14), 0, dp(14), 0)
-            buttonColor = Palette.BG
-            foregroundColor = Palette.TEXT_FAINT
-            setOnClickListener { showGestureGuide() }
-        }
-        column.addView(footerBar, android.widget.LinearLayout.LayoutParams(
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, footerH
-        ))
+
 
         // ---- 诊断条：覆盖在内容顶部，不参与高度分配 ----
         banner = TextView(this).apply {
@@ -311,30 +292,19 @@ class MainActivity : Activity() {
         rootLayout = root
         columnLayout = column
         chromeTop = tabH
-        chromeBottom = transportH + footerH
+        chromeBottom = transportH
 
         // ---- 页面 ----
-        // 0. 音频时间线：主界面。参照多轨编辑器：左轨道头、右波形、上方刻度尺。
-        val timelineHolder = FrameLayout(this)
-        timeline = AudioTimelineView(this).apply {
-            onSeek = { tick -> session.seek(tick); refreshPlayhead() }
-            onLaneTap = { showBackingSettings() }
-            onRequestImport = { pickBackingAudio() }
-        }
-        addToolbar(timelineHolder, "音频时间线", "点轨道头设置 · 长按空白导入")
-        timelineHolder.addView(timeline, pageBodyParams())
-        content.addView(timelineHolder, matchParams())
+        // 0. 编排：音乐片段 + 伴奏波形的主工作区
+        val playlistHolder = FrameLayout(this)
+        playlist = PlaylistView(this)
+        addToolbar(playlistHolder, "编排时间线", "拖动片段 · 双指平移 · 标尺划循环")
+        playlistHolder.addView(playlist, pageBodyParams())
+        content.addView(playlistHolder, matchParams())
 
         // 1. 通道机架
         rack = ChannelRackView(this)
         content.addView(rack, matchParams())
-
-        // 1. 步进器
-        val stepsHolder = FrameLayout(this)
-        steps = StepSequencerView(this)
-        addToolbar(stepsHolder, "步进音序器", "点按或横向刷过格子")
-        stepsHolder.addView(steps, pageBodyParams())
-        content.addView(stepsHolder, matchParams())
 
         // 2. 钢琴卷帘 + 键盘
         val pianoHolder = FrameLayout(this)
@@ -347,26 +317,12 @@ class MainActivity : Activity() {
         ).apply { gravity = android.view.Gravity.BOTTOM })
         content.addView(pianoHolder, matchParams())
 
-        // 3. 播放列表
-        val playlistHolder = FrameLayout(this)
-        playlist = PlaylistView(this)
-        addToolbar(playlistHolder, "编排时间线", "拖动片段 · 双指平移 · 标尺划循环")
-        playlistHolder.addView(playlist, pageBodyParams())
-        content.addView(playlistHolder, matchParams())
-
         // 4. 混音台
         val mixerHolder = FrameLayout(this)
         mixer = MixerView(this)
         addToolbar(mixerHolder, "混音台", "点通道名调音色 · 点 FX 槽调效果")
         mixerHolder.addView(mixer, pageBodyParams())
         content.addView(mixerHolder, matchParams())
-
-        // 5. 自动化
-        val autoHolder = FrameLayout(this)
-        auto = AutomationView(this)
-        addToolbar(autoHolder, "自动化", "绘制参数随时间变化的曲线")
-        autoHolder.addView(auto, pageBodyParams())
-        content.addView(autoHolder, matchParams())
 
         setContentView(root)
 
@@ -455,6 +411,9 @@ class MainActivity : Activity() {
                 transportBar.onLoopToggle?.invoke()
                 configurePlaylistTools(toolbar)
             },
+            (if (session.backing.loaded) "伴奏" else "加伴奏") to {
+                if (session.backing.loaded) showBackingSettings() else pickBackingAudio()
+            },
             "定位" to { session.seek(0); refreshPlayhead(); toast("已回到开头") },
             "缩小" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(42).toFloat() else (playlist.pixelsPerBar / 1.35f).coerceAtLeast(dp(28).toFloat()); playlist.invalidate() },
             "放大" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(120).toFloat() else (playlist.pixelsPerBar * 1.35f).coerceAtMost(dp(360).toFloat()); playlist.invalidate() }
@@ -522,8 +481,7 @@ class MainActivity : Activity() {
             session.project.selectedTrack = idx
             refreshKeyboardForTrack()
             rack.invalidate()
-            steps.invalidate()
-        }
+            }
         rack.onToggleStep = step@{ track, tick ->
             val p = session.project
             val pat = p.patternAt(p.currentPattern) ?: return@step
@@ -545,7 +503,6 @@ class MainActivity : Activity() {
             session.pushBpm()
             session.scheduleAutoSave()
             rack.invalidate()
-            steps.invalidate()
         }
         rack.onToggleMute = { idx ->
             session.project.trackAt(idx)?.let { it.mute = !it.mute }
@@ -573,35 +530,6 @@ class MainActivity : Activity() {
         rack.onRemoveTrack = { idx -> removeTrack(idx) }
         rack.onTrackActions = { idx -> showTrackActions(idx) }
 
-        // ---- 步进器 ----
-        steps.onToggleStep = step@{ track, tick ->
-            val p = session.project
-            val pat = p.patternAt(p.currentPattern) ?: return@step
-            val notes = pat.notes(track)
-            val existing = notes.firstOrNull { it.start == tick }
-            if (existing != null) {
-                notes.remove(existing)
-                session.previewNote(track, existing.pitch, 0)
-            } else {
-                val inst = session.project.trackAt(track)?.instrument
-                val pitch = when (inst) {
-                    com.volt.flowstudio.model.Instrument.DRUM -> steps.baseNote
-                    com.volt.flowstudio.model.Instrument.BASS -> 36
-                    else -> 60
-                }
-                notes.add(com.volt.flowstudio.model.Note(pitch, tick, com.volt.flowstudio.model.Note.STEP, 100))
-                notes.sortBy { it.start }
-                session.previewNote(track, pitch, 100, 180)
-            }
-            session.pushBpm()
-            session.scheduleAutoSave()
-            steps.pattern = pat
-            steps.invalidate()
-        }
-        steps.onPreviewTrack = { track, pitch -> session.previewNote(track, pitch, 100, 300) }
-        steps.onSelectTrack = { idx -> session.project.selectedTrack = idx; session.pushTrack(idx) }
-        steps.instrumentOf = { idx -> session.project.trackAt(idx)?.instrument ?: com.volt.flowstudio.model.Instrument.SYNTH }
-
         // ---- 钢琴卷帘 ----
         piano.onNotesChanged = {
             session.pushBpm()
@@ -628,6 +556,9 @@ class MainActivity : Activity() {
             session.setLoop(on, s, e)
             transportBar.setLoop(on)
         }
+        playlist.onBackingTap = {
+            if (session.backing.loaded) showBackingSettings() else pickBackingAudio()
+        }
 
         // ---- 混音台 ----
         mixer.onTrackChanged = { idx -> session.pushTrack(idx); session.scheduleAutoSave() }
@@ -636,13 +567,15 @@ class MainActivity : Activity() {
         mixer.onOpenSound = { idx -> openSoundPanel(idx) }
         mixer.onOpenFx = { idx, slot -> openFxPanel(idx, slot) }
 
-        // ---- 自动化 ----
-        auto.onChanged = { session.pushAutomation(); session.scheduleAutoSave() }
-
         session.onError = { msg -> toast(msg) }
         // 自动保存保持安静，只有手动保存显示结果。
         session.onSaved = { ok -> if (!ok) toast("自动保存失败，请立即手动保存") }
         session.onLoaded = { p -> refreshAll(p) }
+        session.onBackingChanged = {
+            bindPlaylistBacking()
+            playlist.invalidate()
+            transportBar.invalidate()
+        }
         // AI/插件写入后立刻刷新当前页面，并在底部显示可撤销提示。
         session.onExternalEdit = { label ->
             refreshAll(session.project)
@@ -691,10 +624,6 @@ class MainActivity : Activity() {
         rack.currentPatternIndex = p.currentPattern
         rack.selectedTrack = p.selectedTrack
         rack.invalidate()
-        steps.pattern = p.patternAt(p.currentPattern)
-        steps.trackNames = p.tracks.map { it.name }
-        steps.trackColors = p.tracks.indices.map { Palette.trackColor(it) }
-        steps.invalidate()
         piano.pattern = p.patternAt(p.currentPattern)
         piano.trackIndex = p.selectedTrack
         piano.invalidate()
@@ -703,6 +632,7 @@ class MainActivity : Activity() {
         playlist.loopStart = p.loopStart
         playlist.loopEnd = p.loopEnd
         playlist.selectedTrack = p.selectedTrack
+        bindPlaylistBacking()
         playlist.invalidate()
         mixer.project = p
         mixer.selectedTrack = p.selectedTrack
@@ -738,8 +668,8 @@ class MainActivity : Activity() {
         lightRefresh(index)
         ((content.getChildAt(index) as? FrameLayout)?.getChildAt(0) as? EditorToolbar)?.let { toolbar ->
             when (index) {
-                3 -> configurePianoTools(toolbar)
-                4 -> configurePlaylistTools(toolbar)
+                0 -> configurePlaylistTools(toolbar)
+                2 -> configurePianoTools(toolbar)
             }
         }
         navTitle?.text = tabTitles[index]
@@ -753,35 +683,37 @@ class MainActivity : Activity() {
      * 入场用 OvershootInterpolator（与参考工程的回弹手感一致）：
      * 从 0.92 缩放到 1，300ms，带轻微过冲。
      */
+    /** 从左侧打开工作区抽屉，位置与尺寸稳定，不做无关弹跳。 */
     private fun openNavSheet() {
-        val panel = NavPanelView(this, tabTitles, tabHints, currentTab) { idx ->
+        if (navSheet?.isShowing == true) return
+        val entries = tabTitles + listOf("导入伴奏…", "操作指南")
+        val hints = tabHints + listOf("音频与编曲一起播", "手势与工作区说明")
+        val panel = NavPanelView(this, entries, hints, currentTab, tabTitles.size) { idx ->
             navSheet?.dismiss()
-            showTab(idx)
+            when {
+                idx < tabTitles.size -> showTab(idx)
+                idx == tabTitles.size -> pickBackingAudio()
+                else -> showGestureGuide()
+            }
         }
-        val dialog = android.app.Dialog(this)
+        val dialog = android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
         dialog.setContentView(panel)
         dialog.setCanceledOnTouchOutside(true)
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-        dialog.window?.attributes = dialog.window?.attributes?.apply {
-            dimAmount = 0.45f
-            windowAnimations = 0
-        }
+        dialog.setCancelable(true)
         dialog.setOnDismissListener { navSheet = null }
-        navSheet = dialog
         dialog.show()
-        dialog.window?.setLayout(dp(300), panel.desiredHeight())
-        dialog.window?.setGravity(android.view.Gravity.TOP or android.view.Gravity.START)
-
-        // 回弹入场：缩放 + 轻微位移，比系统淡入更有"点开了"的感觉。
-        panel.scaleX = 0.92f
-        panel.scaleY = 0.92f
-        panel.alpha = 0f
-        panel.translationY = -dp(6).toFloat()
-        panel.animate()
-            .scaleX(1f).scaleY(1f).alpha(1f).translationY(0f)
-            .setDuration(300L)
-            .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
-            .start()
+        dialog.window?.let { window ->
+            window.setBackgroundDrawableResource(android.R.color.transparent)
+            window.setGravity(android.view.Gravity.TOP or android.view.Gravity.START)
+            window.setLayout(dp(288), resources.displayMetrics.heightPixels)
+            window.setDimAmount(0.42f)
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.attributes = window.attributes.apply { windowAnimations = 0 }
+        }
+        navSheet = dialog
+        panel.translationX = -dp(288).toFloat()
+        panel.animate().translationX(0f).setDuration(140L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
     }
 
     /** 切换页面时的最小刷新：只动需要的那几个 View。 */
@@ -789,10 +721,10 @@ class MainActivity : Activity() {
         val p = session.project
         when (index) {
             0 -> {
-                timeline.barTicks = p.barTicks
-                timeline.totalTicks = p.lengthTicks()
-                timeline.bindBacking(session.backing)
-                timeline.invalidate()
+                playlist.project = p
+                playlist.selectedTrack = p.selectedTrack
+                bindPlaylistBacking()
+                playlist.invalidate()
             }
             1 -> {
                 rack.project = p
@@ -801,28 +733,34 @@ class MainActivity : Activity() {
                 rack.invalidate()
             }
             2 -> {
-                steps.pattern = p.patternAt(p.currentPattern)
-                steps.trackNames = p.tracks.map { it.name }
-                steps.trackColors = p.tracks.indices.map { Palette.trackColor(it) }
-                steps.invalidate()
-            }
-            3 -> {
                 piano.pattern = p.patternAt(p.currentPattern)
                 piano.trackIndex = p.selectedTrack
                 piano.invalidate()
             }
-            4 -> {
-                playlist.project = p
-                playlist.selectedTrack = p.selectedTrack
-                playlist.invalidate()
-            }
-            5 -> {
+            3 -> {
                 mixer.project = p
                 mixer.selectedTrack = p.selectedTrack
                 mixer.invalidate()
             }
-            6 -> auto.invalidate()
         }
+    }
+
+    /** 把伴奏快照换算成工程 tick 后交给编排视图，避免两边各算一套。 */
+    private fun bindPlaylistBacking() {
+        val b = session.backing
+        val p = session.project
+        if (!b.loaded) {
+            playlist.backingName = ""
+            playlist.backingPeaks = FloatArray(0)
+            playlist.backingStartTick = 0
+            playlist.backingLengthTicks = 0
+            return
+        }
+        playlist.backingName = b.fileName
+        playlist.backingPeaks = b.peaks
+        playlist.backingStartTick = b.startTick
+        val sec = b.frames.toDouble() / b.sampleRate.coerceAtLeast(1)
+        playlist.backingLengthTicks = (sec * p.bpm / 60.0 * 480.0).toInt().coerceAtLeast(480)
     }
 
     private fun refreshKeyboardForTrack() {
@@ -847,26 +785,24 @@ class MainActivity : Activity() {
         transportBar.setPlaying(session.isPlaying())
         when (currentTab) {
             0 -> {
+                playlist.playheadTick = pos
+                if (session.isPlaying()) playlist.scrollToPlayheadIfNeeded(pos)
+            }
+            1 -> {
                 rack.playheadTick = pos
                 rack.levels = session.engine.trackLevels()
                 rack.invalidate()
             }
-            1 -> { steps.playheadTick = pos; }
             2 -> {
                 piano.playheadTick = pos
                 piano.scrollToPlayhead(pos)
             }
             3 -> {
-                playlist.playheadTick = pos
-                if (session.isPlaying()) playlist.scrollToPlayheadIfNeeded(pos)
-            }
-            4 -> {
                 mixer.levels = session.engine.trackLevels()
                 val pk = session.engine.masterPeak()
                 mixer.masterL = pk.getOrElse(0) { 0f }
                 mixer.masterR = pk.getOrElse(1) { 0f }
             }
-            5 -> auto.playheadTick = pos
         }
     }
 
@@ -992,10 +928,11 @@ class MainActivity : Activity() {
                 runOnUiThread { toast("读不到这个文件") }
                 return@Thread
             }
-            session.backing.import(tmp) { success, message ->
-                runOnUiThread {
-                    toast(if (success) "伴奏已载入：$message" else message)
-                    if (success) transportBar.invalidate()
+            session.importBacking(tmp) { success, message ->
+                toast(if (success) "伴奏已载入：$message" else message)
+                if (success) {
+                    lightRefresh(currentTab)
+                    transportBar.invalidate()
                 }
             }
         }.start()
@@ -1032,7 +969,8 @@ class MainActivity : Activity() {
         gain.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
                 if (!fromUser) return
-                session.backing.setGain(value / 100f)
+                session.backing.setGain(value / 100f, session.project)
+                session.scheduleAutoSave()
                 gainLabel.text = "伴奏音量 ${value}%"
             }
             override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
@@ -1044,7 +982,10 @@ class MainActivity : Activity() {
             text = "静音伴奏"
             isChecked = session.backing.muted
             setTextColor(Palette.TEXT_DIM)
-            setOnCheckedChangeListener { _, checked -> session.backing.setMuted(checked) }
+            setOnCheckedChangeListener { _, checked ->
+                session.backing.setMuted(checked, session.project)
+                session.scheduleAutoSave()
+            }
         }
         wrap.addView(mute)
 
@@ -1059,15 +1000,17 @@ class MainActivity : Activity() {
                     .setItems(controls) { _, which ->
                         when (which) {
                             0 -> {
-                                session.backing.setStartTick(session.positionTicks())
+                                session.backing.setStartTick(session.positionTicks(), session.project)
+                                session.scheduleAutoSave()
                                 toast("伴奏已对齐到当前位置")
                             }
                             1 -> {
-                                session.backing.setStartTick(0)
+                                session.backing.setStartTick(0, session.project)
+                                session.scheduleAutoSave()
                                 toast("伴奏已对齐到开头")
                             }
                             2 -> {
-                                session.backing.clear()
+                                session.clearBacking()
                                 toast("已移除伴奏")
                             }
                         }
@@ -1145,14 +1088,14 @@ class MainActivity : Activity() {
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("手势与操作")
             .setMessage(
-                "页签：点按切换，也可左右滑动。\n\n" +
+                "工作区：点左上角 ☰ 打开列表切换；顶部标题栏显示当前工作区。\n\n" +
+                "编排（首页）：横向是时间，纵向是音轨与伴奏。点标尺定位，拖动片段移动，" +
+                "拖右缘改长度。没有伴奏时点「+ 导入伴奏音频」选择 WAV。\n\n" +
                 "机架：点格子写音，横向刷格子；点通道名调音色；长按通道名管理或删除。\n\n" +
-                "卷帘：点空白画音，拖动音符移动，拖右缘改长度；双指缩放和平移。上方提供量化、删除和缩放。\n\n" +
-                "编排：拖片段移动或跨轨，拖右缘改长度；在标尺上横向划出循环。\n\n" +
-                "旋钮：上下或左右拖动，长按进入精调，双击复位，双指拖动也可精调。\n\n" +
-                "速度：上下拖动 BPM，轻点数字精确输入。\n\n" +
-                "底部控制条：播放/暂停、停止、后退、快进都在这里。\n" +
-                "  快进后退轻点跳一拍，长按连续跳小节。\n\n" +
+                "卷帘：点空白画音，拖动音符移动，拖右缘改长度；双指缩放和平移。" +
+                "上方工具条可切吸附、量化、删除与缩放。\n\n" +
+                "混音：推子、声像、静音/独奏；点通道名进音色，点 FX 槽进效果。\n\n" +
+                "底部走带：播放/暂停、停止、后退、快进。轻点快进后退跳一拍，长按连续跳小节。\n\n" +
                 "工程在编辑后自动保存，切到后台也会保存。"
             )
             .setPositiveButton("开始创作", null)
