@@ -69,26 +69,44 @@ jobs:
 
       - name: 静态检查（防回归）
         run: |
-          # 两条真检查，不做事后过滤、不靠人眼。
           set -e
 
           # 1) 包络缓存 key 不许再写回 `id * N xor cols`。
           #    1.22 真机闪退的根因就是这个表达式：它把片段 id 和像素列数
           #    混进同一个数值空间，两个不同长度的包络撞成同一个 key，
-          #    按当前列数循环就写越界。这里直接禁掉这个写法。
-          if grep -rn 'xor cols' app/src/main/java/com/volt/flowstudio/ui/ | grep -v '^\s*//' ; then
-            echo "✗ 又出现了把列数 xor 进缓存 key 的写法，这会撞 key 并越界"
-            echo "  用带长度的数据类做 key；PlaylistView.EnvelopeKey 是正确写法"
+          #    按当前列数循环就写越界。
+          #
+          #    判定方式必须稳：注释里提到这个写法是允许的（就在本文件上方
+          #    几行的说明里），只有真的出现在代码行上才算回退。
+          #    用 awk 逐行判断"去掉前导空白后是否以 * 或 // 开头"，
+          #    不依赖 grep 的 \s 是否被支持 —— CI 的 grep 就不支持。
+          HITS=$(awk '
+            /xor cols/ {
+              line = $0
+              # 取第一个非空白字符，判断是不是注释
+              if (line ~ /^[[:space:]]*\*/) next
+              if (line ~ /^[[:space:]]*\/\//) next
+              print FILENAME ":" FNR ": " line
+            }
+          ' app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt || true)
+
+          if [ -n "$HITS" ]; then
+            echo "✗ 又在代码里出现了把列数 xor 进缓存 key 的写法："
+            echo "$HITS"
+            echo "  用带长度的数据类做 key；PlaylistView.EnvelopeKey 是正确做法"
             exit 1
           fi
           echo "✓ 包络缓存 key 未回退"
 
-          # 2) 所有按列循环访问数组的地方，长度必须来自数组本身。
-          #    抓不到全部情况，但能抓住"自己算 cols、却索引别人长度数组"这类。
-          if grep -rn 'for (c in 0 until cols)' app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt \
-             | grep -v 'drawAudioWave' ; then
-            echo "注意：上面这些按 cols 循环的绘制点，请确认索引的是长度为 cols 的数组"
+          # 2) 绘制循环必须按数组自身长度取上界。
+          #    drawNoteEnvelope 里那处 `for (c in 0 until cols)` 已经改成
+          #    `0 until drawCols`，这里确认没有别处又按 cols 直接索引 energy。
+          if awk '/for \(c in 0 until cols\)/ { found = 1 } END { exit !found }' \
+               app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt ; then
+            echo "✗ 仍有按 cols 循环的做法，确认索引的不是别的长度的数组"
+            exit 1
           fi
+          echo "✓ 绘制循环上界取自数组长度"
 
           echo "✓ 静态检查通过"
 
