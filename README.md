@@ -14,6 +14,59 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.28 更新
+
+- **修中文请求体死锁（这一版最重要的一条）**：桥接原来用
+  `BufferedReader` + `CharArray(contentLength)` 读 body ——
+  Content-Length 是字节数，CharArray 装的是字符数。ASCII 请求体
+  1 字节 = 1 字符，看不出问题；body 里一旦有中文（工程名、轨道名、
+  投递文件名都是中文），3 字节才凑 1 个字符，`read()` 永远填不满
+  `contentLength` 个字符，循环一直等到 **socket 读超时（20 秒）** 才返回
+  截断的内容。表现就是：
+  - 「推送超时，其实已经落库」—— 差一点重试把结果冲掉
+  - 「音频导入 socket hang up」—— 被误判成体积墙，白做降采样
+  - 「中文工程名打不开」—— `POST /projects/open` 挂 20 秒回空
+  现在整个请求按字节处理：请求行/头部读到 `\n` 为止，body 精确读
+  `contentLength` 个字节后一次性 UTF-8 解码。
+- **新增删轨接口**：`DELETE /tracks/{i}` 与 batch 的 `tracks.delete`。
+  以前桥接只能建轨不能删轨，导入失败留下的半截空轨没有任何出路，
+  AI 只能把它改名成「空轨·可删」并静音，等用户去 App 里长按删 ——
+  等于把自己造成的垃圾留给人收拾。删除时会一并清掉这条轨的音符、
+  片段与自动化，并把大于该下标的一切整体前移。
+- **投递目录改为可诊断**：`GET /inbox` 现在返回 `exists` / `canRead` /
+  `canWrite` / `mediaPermissionGranted` 和一段人话说明，不再只是
+  `pending: []`。过去这三种完全不同的故障（目录不存在、没有读权限、
+  文件真被吃掉了）都表现为一个空数组，无从判断。
+- **运行时申请 `READ_MEDIA_AUDIO`**：这才是「inbox 名存实亡」的真因 ——
+  权限声明在清单里但从未在运行时申请，`granted=false`，App 连别人放进
+  `Music/FlowStudio/inbox/` 的音频文件都列不出来，FileObserver 本身
+  没问题。新增 `POST /inbox/rescan` 立刻补扫一次。
+- `drainInbox` 区分「目录不存在」与「没权限」，把原因写进日志。
+
+插件 1.4.0 同步：
+
+- **修 `index.js` 残留 `import { readToken }`** —— 这个导出在 1.27 删掉了，
+  导致整个插件模块加载失败（`does not provide an export named`），
+  一个工具都注册不上。这是「只能翻源码手写 Node 脚本」的原因。
+- **新增 `lib/coerce.js`**：`type: 'json'` 的参数既收真对象也收 JSON 字符串
+  （围栏代码块、尾逗号、单引号都能吃），垃圾输入明确报错。
+  `harmony` / `write` / `export` / `batch` / `arrange` / `arrange_song` /
+  `edit` 的 notes / `drum_pattern` 全部接上。
+- **修 `media.js` 在 ESM 里调 `require('node:fs')`** ——
+  `flowstudio_drop_audio` 一调用就抛 `require is not defined`，
+  整个投递通道是坏的，而它恰恰是「免拉起 App」的卖点。
+- **重写 `flowstudio_validate`**：`/state` 里的 `project` 是**计数**
+  （`{tracks:5, patterns:3, clips:17}`）而不是工程本体，原来把它当数组
+  遍历，一跑就崩 `notes is not iterable` —— 有音频片段时必崩。
+  现在从 `/status/full` 的顶层数组取，音符的两种形状（对象与四元组
+  扁平数组）都认。
+- `drum_pattern` 直接返回可提交的四元组音符数组（`notes` / `byPitch` /
+  `byTrack`），不再只给摘要。
+- `setProject` 超时 8s → 60s；`import_audio` 断连时先查是否已落地、
+  再重试一次，不再把传输抖动误报成体积墙。
+- 清理 `bridge.js` 里的令牌残留（401 分支、过时注释、孤立 doc 块）。
+- 新增 `test/coerce.test.mjs`（8 组）。
+
 ## 1.27 更新
 
 - **桥接免鉴权（应要求，整层删除令牌体系）**：只绑 127.0.0.1 —— 能连上回环的
