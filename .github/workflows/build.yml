@@ -98,15 +98,23 @@ jobs:
           fi
           echo "✓ 包络缓存 key 未回退"
 
-          # 2) 绘制循环必须按数组自身长度取上界。
-          #    drawNoteEnvelope 里那处 `for (c in 0 until cols)` 已经改成
-          #    `0 until drawCols`，这里确认没有别处又按 cols 直接索引 energy。
-          if awk '/for \(c in 0 until cols\)/ { found = 1 } END { exit !found }' \
-               app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt ; then
-            echo "✗ 仍有按 cols 循环的做法，确认索引的不是别的长度的数组"
+          # 2) drawNoteEnvelope 里的循环上界必须来自数组自身，不能再用 cols。
+          #    energy 是从缓存取回来的，它的长度未必等于本次的 cols。
+          #    （drawAudioWave 里用 cols 是对的 —— 那里的数组就是按 cols 现算的，
+          #      所以检查只限定在 drawNoteEnvelope 函数体内。）
+          BAD=$(awk '
+            /private fun drawNoteEnvelope/ { inside = 1 }
+            inside && /for \(c in 0 until cols\)/ { print FNR ": " $0 }
+            inside && /^    }$/ { inside = 0 }
+          ' app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt || true)
+
+          if [ -n "$BAD" ]; then
+            echo "✗ drawNoteEnvelope 里又按 cols 循环了："
+            echo "$BAD"
+            echo "  上界要用 energy.size.coerceAtMost(cols)"
             exit 1
           fi
-          echo "✓ 绘制循环上界取自数组长度"
+          echo "✓ drawNoteEnvelope 循环上界取自数组长度"
 
           echo "✓ 静态检查通过"
 
