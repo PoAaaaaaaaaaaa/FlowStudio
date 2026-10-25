@@ -118,9 +118,10 @@ class TransportBar @JvmOverloads constructor(
     private fun drawBottom(canvas: Canvas, w: Float, h: Float) {
         val bh = h - dp(12f)
         val top = dp(6f)
-        val mainW = dp(52f)
+        val mainW = dp(54f)
+        val playW = dp(64f)
         val gap = dp(8f)
-        val groupW = mainW * 4 + gap * 3
+        val groupW = mainW * 3 + playW + gap * 3
         var gx = ((w - groupW) / 2f).coerceAtLeast(dp(6f))
 
         box(Control.REW, gx, top, mainW, bh)
@@ -128,10 +129,10 @@ class TransportBar @JvmOverloads constructor(
         drawSeekIcon(canvas, Control.REW, backward = true)
         gx += mainW + gap
 
-        box(Control.PLAY, gx, top, mainW, bh)
+        box(Control.PLAY, gx, top, playW, bh)
         drawButton(canvas, Control.PLAY, if (playing) Palette.ACCENT else Palette.ACCENT_DIM)
         drawPlayIcon(canvas)
-        gx += mainW + gap
+        gx += playW + gap
 
         box(Control.STOP, gx, top, mainW, bh)
         drawButton(canvas, Control.STOP, Palette.PANEL_HI)
@@ -144,14 +145,17 @@ class TransportBar @JvmOverloads constructor(
         drawButton(canvas, Control.FWD, Palette.PANEL_HI)
         drawSeekIcon(canvas, Control.FWD, backward = false)
 
-        // 左侧：位置 + BPM
+        // 左侧：位置 + BPM（按钮组左边界之外才画，防止窄屏互相压住）
         val bar = positionTicks / barTicks + 1
         val beat = (positionTicks % barTicks) / Note.PPQ + 1
         val step = (positionTicks % Note.PPQ) / Note.STEP + 1
-        label(canvas, String.format("%03d:%02d:%02d", bar, beat, step),
-            dp(12f), h * 0.56f, Palette.CYAN, sp(13f))
-        label(canvas, "${String.format("%.1f", bpm)} BPM", dp(12f), h - dp(5f),
-            Palette.TEXT_DIM, sp(8f))
+        val leftLimit = boxes.getValue(Control.REW)[0] - dp(10f)
+        if (leftLimit > dp(92f)) {
+            label(canvas, String.format("%03d:%02d:%02d", bar, beat, step),
+                dp(14f), h * 0.55f, Palette.CYAN, sp(13f))
+            label(canvas, "${String.format("%.1f", bpm)} BPM", dp(14f), h - dp(5f),
+                Palette.TEXT_DIM, sp(8f))
+        }
 
         // 右侧：更多 / 导出（窄屏只保留更多）
         val moreW = dp(46f)
@@ -165,8 +169,9 @@ class TransportBar @JvmOverloads constructor(
             drawButton(canvas, Control.EXPORT, Palette.PANEL_HI)
             centeredLabel(canvas, Control.EXPORT, "导出", Palette.TEXT)
         }
-        label(canvas, "轻点跳一拍 · 长按跳一小节", w - dp(12f), h - dp(5f),
-            Palette.TEXT_FAINT, sp(7.5f), center = false)
+        // 提示放在按钮组正下方居中，避免与右侧「更多/导出」文字叠在一起。
+        label(canvas, "轻点跳一拍 · 长按跳小节", (w / 2f), h - dp(3f),
+            Palette.TEXT_FAINT, sp(7f), center = true)
     }
 
     /** 顶部信息条：BPM、位置、循环/节拍、保存、更多；播放控制不在这里。 */
@@ -399,26 +404,47 @@ class TabBar @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
+        // 页签整体是一枚悬浮胶囊，与内容之间留出空气感。
+        rect(canvas, 0f, 0f, w, h, Palette.BG)
         if (tabs.isEmpty()) return
-        val tw = w / tabs.size
+        val inset = dp(10f)
+        val pillTop = dp(6f)
+        val pillBottom = h - dp(6f)
+        rect(canvas, inset, pillTop, w - inset, pillBottom, Palette.SURFACE, dp(13f))
+        outline(canvas, inset, pillTop, w - inset, pillBottom,
+            Palette.withAlpha(Palette.LINE, 150), dp(13f), dp(0.8f))
+
+        val usable = w - inset * 2 - dp(8f)
+        val tw = usable / tabs.size
         tabs.indices.forEach { index ->
-            val x0 = index * tw
+            val x0 = inset + dp(4f) + index * tw
             val active = index == selected
-            if (active || pressed == index) {
-                rect(canvas, x0 + dp(5f), dp(6f), x0 + tw - dp(5f), h - dp(6f),
-                    if (active) Palette.withAlpha(Palette.ACCENT, 26) else Palette.PANEL_HI, dp(9f))
-            }
+            val pressedNow = pressed == index
             if (active) {
-                rect(canvas, x0 + tw * 0.28f, h - dp(3.5f), x0 + tw * 0.72f, h - dp(1f),
-                    Palette.ACCENT, dp(1.5f))
-                // 选中的页签顶部一个小亮点，帮助眼睛快速定位当前页
-                rect(canvas, x0 + tw / 2f - dp(1.5f), dp(3f), x0 + tw / 2f + dp(1.5f), dp(5f),
-                    Palette.withAlpha(Palette.ACCENT, 150), dp(1f))
+                rect(canvas, x0 + dp(3f), pillTop + dp(4f), x0 + tw - dp(3f), pillBottom - dp(4f),
+                    Palette.withAlpha(Palette.ACCENT, 34), dp(10f))
+                rect(canvas, x0 + dp(3f), pillTop + dp(4f), x0 + tw - dp(3f), pillTop + dp(5.5f),
+                    Palette.ACCENT, dp(1f))
+            } else if (pressedNow) {
+                rect(canvas, x0 + dp(3f), pillTop + dp(4f), x0 + tw - dp(3f), pillBottom - dp(4f),
+                    Palette.PANEL_HI, dp(10f))
             }
             label(canvas, tabs[index], x0 + tw / 2f, h / 2f + sp(4f),
-                if (active) Palette.ACCENT else Palette.TEXT_DIM, sp(11f), active, true)
+                when {
+                    active -> Palette.ACCENT
+                    pressedNow -> Palette.TEXT
+                    else -> Palette.TEXT_DIM
+                }, sp(11f), active, true)
         }
+    }
+
+    /** 页签命中区必须与绘制时的胶囊内缩一致，否则点中间会选错。 */
+    private fun tabIndexAt(x: Float): Int {
+        if (tabs.isEmpty()) return 0
+        val inset = dp(10f) + dp(4f)
+        val usable = width.toFloat() - inset * 2
+        if (usable <= 0f) return 0
+        return ((x - inset) / (usable / tabs.size)).toInt().coerceIn(0, tabs.lastIndex)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -427,7 +453,7 @@ class TabBar @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downY = event.y
-                pressed = (event.x / (width.toFloat() / tabs.size)).toInt().coerceIn(0, tabs.lastIndex)
+                pressed = tabIndexAt(event.x)
                 invalidate()
             }
             MotionEvent.ACTION_UP -> {
@@ -437,8 +463,7 @@ class TabBar @JvmOverloads constructor(
                     val target = (selected + if (dx < 0) 1 else -1).coerceIn(0, tabs.lastIndex)
                     if (target != selected) onTabSelected?.invoke(target)
                 } else if (abs(dx) < dp(24f) && abs(dy) < dp(24f)) {
-                    val index = (event.x / (width.toFloat() / tabs.size)).toInt().coerceIn(0, tabs.lastIndex)
-                    onTabSelected?.invoke(index)
+                    onTabSelected?.invoke(tabIndexAt(event.x))
                 }
                 pressed = -1
                 invalidate()

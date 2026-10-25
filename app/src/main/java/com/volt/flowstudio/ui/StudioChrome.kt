@@ -35,6 +35,21 @@ class StudioBackground @JvmOverloads constructor(
         b.fill.style = android.graphics.Paint.Style.FILL
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), b.fill)
         b.fill.shader = null
+        // 极淡的网格：给大面积暗色一点"工作台"的质感，不抢内容。
+        val step = dp(28f)
+        if (step <= 0f) return
+        b.stroke.color = Palette.withAlpha(Palette.LINE, 16)
+        b.stroke.strokeWidth = dp(0.6f)
+        var x = 0f
+        while (x < width) {
+            canvas.drawLine(x, 0f, x, height.toFloat(), b.stroke)
+            x += step
+        }
+        var y = 0f
+        while (y < height) {
+            canvas.drawLine(0f, y, width.toFloat(), y, b.stroke)
+            y += step
+        }
     }
 }
 
@@ -77,6 +92,7 @@ class FlowButton @JvmOverloads constructor(
         )
     }
 
+    private fun dp(value: Float): Float = value * resources.displayMetrics.density
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
 
@@ -103,7 +119,8 @@ class EditorToolbar @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
         rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
-        rect(canvas, dp(10f), dp(8f), dp(13f), h - dp(8f), Palette.ACCENT, dp(1.5f))
+        line(canvas, 0f, h - 0.5f, w, h - 0.5f, Palette.withAlpha(Palette.LINE, 120), dp(0.8f))
+        rect(canvas, dp(10f), dp(9f), dp(12.5f), h - dp(9f), Palette.ACCENT, dp(1.5f))
         val compact = w < dp(500f)
         val titleWidth = if (compact) dp(86f) else dp(142f)
         label(canvas, clipText(title, titleWidth - dp(20f), sp(12f), true),
