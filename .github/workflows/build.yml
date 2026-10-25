@@ -9,11 +9,11 @@ on:
       version_name:
         description: '版本名（例如 1.0.0）'
         required: false
-        default: '1.24'
+        default: '1.25'
 
 env:
-  VERSION_NAME: ${{ github.event.inputs.version_name || '1.24' }}
-  VERSION_CODE: '26'
+  VERSION_NAME: ${{ github.event.inputs.version_name || '1.25' }}
+  VERSION_CODE: '27'
   # ubuntu-latest 预装了 Android SDK，直接用；不走会坏的 setup-android action
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -126,7 +126,25 @@ jobs:
             --no-daemon --stacktrace
 
       - name: 构建 Debug APK
-        run: gradle :app:assembleDebug --no-daemon
+        run: |
+          # debug 包必须用仓库里这份固定 keystore 签名。
+          # GitHub Actions 默认给每个 runner 生成一个随机 debug key，
+          # 签名每次都变 → 用户无法覆盖安装，只能卸载重装 → 工程全丢。
+          # 这个 keystore 只用于 debug（不上架、不含机密），入库没有风险。
+          # 用 apksigner 在 gradle 之后重签：gradle 的 debug signingConfig
+          # 由 gradle 自己管理，从外部替换 keystore 反而复杂。
+          gradle :app:assembleDebug --no-daemon
+          APK=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          # gradle 出的包已 zipalign（v2 签名会被 zipalign 破坏，
+          # 所以 apksigner 必须在 zipalign 之后跑 —— 顺序不能换）。
+          "$BT/zipalign" -f -p 4 "$APK" /tmp/dbg-aligned.apk
+          "$BT/apksigner" sign \
+            --ks "$GITHUB_WORKSPACE/tools/debug.keystore" \
+            --ks-pass pass:flowstudio --key-pass pass:flowstudio \
+            --ks-key-alias flowstudio \
+            --out "$APK" /tmp/dbg-aligned.apk
+          "$BT/apksigner" verify --print-certs "$APK" | head -4
 
       - name: 校验产物
         run: |

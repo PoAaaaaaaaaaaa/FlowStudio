@@ -453,7 +453,7 @@ class StudioSession(private val context: Context) {
                 if (asset == null) {
                     // 导入失败要把号还回去，否则 id 会一直虚涨。
                     if (project.nextAudioId == nextId + 1) project.nextAudioId = nextId
-                    onDone?.invoke(false, "无法解码这个音频：只支持 PCM WAV（16/24/32-bit 或 float）")
+                    onDone?.invoke(false, "无法解码这个音频：支持 WAV / MP3 / M4A / FLAC / OGG")
                 } else {
                     project.audioAssets.add(asset)
                     val track = project.selectedTrack.coerceIn(0, maxOf(0, project.tracks.size - 1))

@@ -6,14 +6,15 @@ local.properties
 *.iml
 .idea/
 
-# 本机签名私钥（绝不入库）
-tools/debug.keystore
-tools/*.keystore
-
+# debug 签名例外：这个 keystore 必须入库。
+# 它只用于 debug 包（不上架、不加密内容），而"每次 CI 重新生成一个
+# 随机 debug key"的代价是：签名每次都变，用户无法覆盖安装，
+# 必须卸载重装 —— 工程全丢。稳定签名是数据不丢的前提。
+# release 用的正式签名走 CI 环境变量（FLOW_KEYSTORE），仍然不入库。
+!tools/debug.keystore
 # 系统垃圾
 .DS_Store
 Thumbs.db
 *.log
 engine/build-host/
-tools/debug.keystore
 app/src/main/jniLibs/

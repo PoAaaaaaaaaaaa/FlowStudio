@@ -218,7 +218,7 @@ class TransportBar @JvmOverloads constructor(
         box(Control.MORE, rx, top, moreW, bh)
         drawButton(canvas, Control.MORE, Palette.PANEL_HI)
         centeredLabel(canvas, Control.MORE, "更多", Palette.TEXT)
-        if (w > dp(680f)) {
+        if (w > dp(600f)) {
             box(Control.SAVE, rx - dp(6f) - dp(48f), top, dp(48f), bh)
             drawButton(canvas, Control.SAVE, Palette.PANEL_HI)
             centeredLabel(canvas, Control.SAVE, "保存", Palette.TEXT)

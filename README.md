@@ -14,6 +14,25 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.25 更新
+
+- **修"不能新开工程"**：根因是 UI 入口缺失，不是功能坏了 —— 「工程」按钮
+  只在屏宽 > 680dp 时才画，TB321FU 横屏约 470dp 永远看不到。现在
+  「更多」菜单第一项就是「工程…（新建/打开/删除）」，导航抽屉也加了
+  「工程管理」；宽屏阈值降到 600dp。
+- **修"导入音频与被占轨道叠在同一位置"**：placeAudio 原来直接丢在
+  selectedTrack 的播放头位置，不查重叠。现在三层避让：
+  请求轨被占 → 换第一条空轨；全占 → 自动追加新轨；同轨撞车 → 顺延到
+  占用片段末尾。连续批量导入（投递一批 stem）互不重叠。
+  纯 Kotlin 回归 7 项（PlaceAudioTest），可直接在桌面 JVM 跑。
+- **修"不能覆盖安装"**：CI 的 debug 包用 GitHub runner 随机生成的
+  debug key 签名，签名每次都变 → 覆盖安装被系统拒绝 → 卸载重装工程全丢。
+  现在仓库提交一份固定的 debug keystore（tools/debug.keystore，仅 debug 用，
+  无机密），CI 用 apksigner 重签 —— 与本地打包同一签名，可覆盖安装。
+- **桥接连接升级**：App 启动时把端口+令牌+协议版本写成
+  `Music/FlowStudio/bridge.json` 一份文件，插件读它直连，
+  不再猜端口、不再在 6 个路径里逐个试令牌。老逻辑保留作回退。
+
 ## 1.24 更新
 
 - **导音频支持 mp3 等压缩格式**：以前 AudioStore 只认 PCM WAV，

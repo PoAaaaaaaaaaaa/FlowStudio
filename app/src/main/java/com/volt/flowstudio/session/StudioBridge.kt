@@ -197,6 +197,19 @@ class StudioBridge(
                     if (cur != t) m.writeText(t)
                     m.isFile && m.length() > 0
                 }.getOrDefault(false)
+                // bridge.json：一份文件带全部连接信息（端口+令牌+协议版本）。
+                // 插件读它就能直连，不用猜端口、不用逐路径试令牌。
+                // 放在 Music/FlowStudio/ 下，与令牌镜像同目录，外部工具一眼能看到。
+                runCatching {
+                    val info = File(
+                        android.os.Environment.getExternalStoragePublicDirectory(
+                            android.os.Environment.DIRECTORY_MUSIC
+                        ),
+                        "FlowStudio/bridge.json"
+                    )
+                    info.parentFile?.mkdirs()
+                    info.writeText("""{"app":"FlowStudio","port":$port,"token":"$t","protocol":2,"version":"${session.versionName()}"}""")
+                }
                 // 镜像是"插件能不能连上"的前提，失败必须留下痕迹，
                 // 否则只剩一句"连不上"，排查时无从下手。
                 if (ok) {

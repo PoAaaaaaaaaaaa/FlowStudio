@@ -58,16 +58,47 @@ class Project {
 
     fun audioAssetById(id: Int): AudioAsset? = audioAssets.firstOrNull { it.id == id }
 
-    /** 把素材摆到某条轨道的某个位置，返回新片段。长度默认铺满整段素材。 */
+    /**
+     * 把素材摆到时间线上，返回新片段。长度默认铺满整段素材。
+     *
+     * 避让规则（这是"导入音频"的落点策略）：
+     *   1. 先从请求的轨道往后找第一条空轨道 —— 新素材独占一条轨，
+     *      是 DJ 式排布的默认习惯，也绝不可能撞别人的内容；
+     *   2. 没有空轨道就追加一条新轨道；
+     *   3. startTick 落在该轨已有片段上时，顺延到第一个空位。
+     *
+     * 之前的实现直接丢在 selectedTrack 的播放头位置：那里已经有片段时
+     * 两个片段叠在同一轨同一时间，互相吃内容 —— 用户报告的就是这个。
+     */
     fun placeAudio(
-        asset: AudioAsset, track: Int, startTick: Int, lengthTicks: Int = 0
+        asset: AudioAsset, track: Int, startTick: Int, lengthTicks: Int = 0,
+        allowNewTrack: Boolean = true
     ): Clip {
         val len = if (lengthTicks > 0) lengthTicks else asset.lengthTicks(bpm)
+
+        // 1. 找空轨道：请求轨为空就用它，否则往后面找
+        var target = track.coerceIn(0, maxOf(0, tracks.size - 1))
+        val emptyTrack = tracks.indices.firstOrNull { t -> clips.none { it.track == t } }
+        target = if (clips.none { it.track == target }) target
+        else emptyTrack ?: if (allowNewTrack) {
+            addTrack(Instrument.SYNTH, "音频 ${tracks.size + 1}")
+            tracks.size - 1
+        } else target
+
+        // 2. 找该轨第一个空位：从 startTick 起，撞上片段就跳到它末尾
+        var start = startTick.coerceAtLeast(0)
+        var guard = 0
+        while (guard++ < 64) {
+            val hit = clips.firstOrNull { it.track == target && start < it.end && start + len > it.start }
+                ?: break
+            start = hit.end
+        }
+
         val c = Clip(
             id = nextClipId++,
             patternId = -1,
-            track = track.coerceIn(0, maxOf(0, tracks.size - 1)),
-            start = startTick.coerceAtLeast(0),
+            track = target,
+            start = start,
             length = len.coerceAtLeast(Note.STEP),
             offset = 0,
             label = "",

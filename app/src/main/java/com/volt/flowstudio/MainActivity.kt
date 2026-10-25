@@ -707,13 +707,14 @@ class MainActivity : Activity() {
     /** 从左侧打开工作区抽屉，位置与尺寸稳定，不做无关弹跳。 */
     private fun openNavSheet() {
         if (navSheet?.isShowing == true) return
-        val entries = tabTitles + listOf("导入音频…", "操作指南")
-        val hints = tabHints + listOf("音频铺到时间线上", "手势与工作区说明")
+        val entries = tabTitles + listOf("导入音频…", "工程管理…", "操作指南")
+        val hints = tabHints + listOf("音频铺到时间线上", "新建 / 打开 / 删除", "手势与工作区说明")
         val panel = NavPanelView(this, entries, hints, currentTab, tabTitles.size) { idx ->
             navSheet?.dismiss()
             when {
                 idx < tabTitles.size -> showTab(idx)
                 idx == tabTitles.size -> pickAudio()
+                idx == tabTitles.size + 1 -> showProjectDialog()
                 else -> showGestureGuide()
             }
         }
@@ -1070,11 +1071,12 @@ class MainActivity : Activity() {
 
     private fun showMoreDialog() {
         val items = arrayOf(
+            "工程…（新建 / 打开 / 删除）",
             "保存工程",
-            "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
-            "摇摆 / Swing",
             "导入音频…",
             "按曲风起步…",
+            "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
+            "摇摆 / Swing",
             "DJ 与混音知识",
             "操作指南",
             "撤销 AI 最近一次编辑"
@@ -1083,14 +1085,15 @@ class MainActivity : Activity() {
             .setTitle("更多控制")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> transportBar.onSave?.invoke()
-                    1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
-                    2 -> showSwingDialog()
-                    3 -> pickAudio()
-                    4 -> showGenrePicker()
-                    5 -> showDjKnowledge()
-                    6 -> showGestureGuide()
-                    7 -> {
+                    0 -> showProjectDialog()
+                    1 -> transportBar.onSave?.invoke()
+                    2 -> pickAudio()
+                    3 -> showGenrePicker()
+                    4 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
+                    5 -> showSwingDialog()
+                    6 -> showDjKnowledge()
+                    7 -> showGestureGuide()
+                    8 -> {
                         val ok = session.undoExternalEdit()
                         toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
                         refreshAll(session.project)
