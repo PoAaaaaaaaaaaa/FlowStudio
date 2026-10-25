@@ -15,8 +15,8 @@ android {
         // CI 用 -PversionCode / -PversionName 注入；本地直接构建时用下面的默认值。
         // 之前这里是硬编码，workflow 里传的 -PversionName 根本没被读取 ——
         // 手填 1.0.0 打出来还是旧版本号，产物名和内容对不上。
-        versionCode = (findProperty("versionCode") as String?)?.toIntOrNull() ?: 29
-        versionName = (findProperty("versionName") as String?) ?: "1.27"
+        versionCode = (findProperty("versionCode") as String?)?.toIntOrNull() ?: 30
+        versionName = (findProperty("versionName") as String?) ?: "1.28"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

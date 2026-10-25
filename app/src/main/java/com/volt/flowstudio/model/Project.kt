@@ -158,6 +158,38 @@ class Project {
         return tracks.size - 1
     }
 
+    /**
+     * 删除一条轨道，连同所有指向它的内容。
+     *
+     * 必须一起清掉的：样式里这条轨的音符、播放列表里这条轨的片段、
+     * 这条轨的自动化 —— 漏掉任何一样都会留下"引用不存在的轨道"，
+     * App 播放时找不到轨就静音，用户只会觉得"删完就坏了"。
+     * 比 idx 大的下标要整体前移。
+     *
+     * @return 删除成功返回 null，否则返回拒绝的原因。
+     */
+    fun removeTrackAt(idx: Int): String? {
+        if (idx !in tracks.indices) return "轨道 $idx 不存在（共 ${tracks.size} 条）"
+        if (tracks.size <= 1) return "至少要留一条轨道"
+
+        // 样式：先删这条轨，再把大于 idx 的下标前移
+        patterns.forEach { pat ->
+            pat.tracks.remove(idx)
+            val moved = mutableMapOf<Int, MutableList<Note>>()
+            pat.tracks.forEach { (k, v) -> moved[if (k > idx) k - 1 else k] = v }
+            pat.tracks.clear()
+            pat.tracks.putAll(moved)
+        }
+        clips.removeAll { it.track == idx }
+        clips.forEach { if (it.track > idx) it.track -= 1 }
+        automations.removeAll { it.track == idx }
+        automations.forEach { if (it.track > idx) it.track -= 1 }
+
+        tracks.removeAt(idx)
+        if (selectedTrack >= tracks.size) selectedTrack = (tracks.size - 1).coerceAtLeast(0)
+        return null
+    }
+
     fun maxClipLength(track: Int, startTick: Int, ignoreId: Int = -1): Int {
         var end = Note.BAR * 64
         clips.filter { it.track == track && it.id != ignoreId && it.start >= startTick }

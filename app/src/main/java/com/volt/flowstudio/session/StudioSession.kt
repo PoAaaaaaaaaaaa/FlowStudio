@@ -5,6 +5,8 @@ import android.os.Handler
 import android.os.Looper
 import com.volt.flowstudio.audio.NativeEngine
 import com.volt.flowstudio.model.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -544,7 +546,17 @@ class StudioSession(private val context: Context) {
     /** 把 inbox 里积压的文件全部导入（App 启动时调用）。 */
     private fun drainInbox() {
         val dir = inboxDir()
-        val files = dir.listFiles { f -> f.isFile && f.length() > 1024 } ?: return
+        // listFiles 返回 null 有两种含义：目录不存在，或没有读权限。
+        // 过去这里直接 `?: return` 把它当成"没东西"，是最难查的一种静默失败。
+        val all = dir.listFiles()
+        if (all == null) {
+            android.util.Log.w(
+                "FlowStudio",
+                "投递目录列不出来: exists=${dir.exists()} canRead=${dir.canRead()} · ${inboxDiagnostics()}"
+            )
+            return
+        }
+        val files = all.filter { it.isFile && it.length() > 1024 }
         for (f in files) {
             importAudio(f, f.name) { ok, msg ->
                 runCatching { f.delete() }
@@ -558,7 +570,79 @@ class StudioSession(private val context: Context) {
 
     /** 供桥接查询投递状态，插件能确认文件有没有被吃掉。 */
     fun inboxPending(): List<String> =
-        inboxDir().listFiles { f -> f.isFile }?.map { it.name } ?: emptyList()
+        inboxDir().listFiles { f -> f.isFile }?.map { f -> f.name } ?: emptyList()
+
+    /**
+     * 投递目录的体检结果。
+     *
+     * 为什么需要它：inbox 失效时过去只有"pending: []"这一个信号，
+     * 看起来像"目录是空的"，而实际情况可能是
+     *   - 目录不存在（App 在 Android 11+ 上写不了公共 Music，mkdirs 静默失败）
+     *   - 目录存在但读不到（缺 READ_MEDIA_AUDIO，listFiles 返回 null）
+     * 两种都表现为空列表，用户和 AI 都无从判断。这里把区别显式说出来。
+     */
+    fun inboxDiagnostics(): JSONObject {
+        val dir = inboxDir()
+        val canRead = dir.canRead()
+        val exists = dir.exists()
+        val files = runCatching { dir.listFiles() }.getOrNull()
+        val canWrite = runCatching {
+            val probe = File(dir, ".write-probe")
+            val ok = probe.createNewFile()
+            if (ok) probe.delete()
+            ok
+        }.getOrDefault(false)
+
+        val mediaPerm = if (android.os.Build.VERSION.SDK_INT >= 33)
+            "android.permission.READ_MEDIA_AUDIO"
+        else
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        val granted = context.checkSelfPermission(mediaPerm) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        val notes = mutableListOf<String>()
+        if (!exists) notes.add("目录不存在（App 在 Android 11+ 无法在公共 Music 下建目录）")
+        if (exists && !canRead) notes.add("目录读不到：缺 $mediaPerm")
+        if (exists && canRead && !canWrite) notes.add("App 无法往这里写（投递方向不受影响）")
+        if (!granted) notes.add("未授予 $mediaPerm —— 别人放进去的音频会看不见")
+
+        return JSONObject()
+            .put("ok", true)
+            .put("dir", dir.absolutePath)
+            .put("exists", exists)
+            .put("canRead", canRead)
+            .put("canWrite", canWrite)
+            .put("mediaPermissionGranted", granted)
+            .put("mediaPermission", mediaPerm)
+            .put("entryCount", files?.size ?: -1)
+            .put("notes", JSONArray(notes))
+    }
+
+    /**
+     * 重新扫一遍投递目录。权限刚被授予、或用户手动塞了文件时调用。
+     *
+     * 和 startInboxWatch 的区别：这个不重建监听器，只补一次导入，
+     * 用于"监听器已经在，但之前因为权限看不见文件"的场景。
+     */
+    fun rescanInbox() {
+        val dir = inboxDir()
+        if (!dir.exists() || !dir.canRead()) {
+            android.util.Log.w(
+                "FlowStudio",
+                "投递目录不可读，跳过补扫: exists=${dir.exists()} canRead=${dir.canRead()}"
+            )
+            return
+        }
+        val files = dir.listFiles { f -> f.isFile && f.length() > 1024 } ?: return
+        if (files.isEmpty()) return
+        android.util.Log.i("FlowStudio", "补扫投递目录：${files.size} 个文件")
+        for (f in files) {
+            importAudio(f, f.name) { ok, msg ->
+                runCatching { f.delete() }
+                if (!ok) android.util.Log.w("FlowStudio", "投递导入失败 ${f.name}: $msg")
+            }
+        }
+    }
 
     /** 一次性清空所有音频片段与素材（含磁盘文件），给插件的重置动作。 */
     fun clearAllAudio() {

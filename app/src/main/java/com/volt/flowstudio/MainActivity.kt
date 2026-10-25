@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private var bannerExtra = 0
     private var bannerHeight = 0
     private val REQ_PICK_AUDIO = 4101
+    private val REQ_MEDIA_PERM = 4102
     private var columnLayout: android.widget.LinearLayout? = null
     private var navBar: android.widget.LinearLayout? = null
     private var navMenuButton: FlowButton? = null
@@ -84,6 +85,46 @@ class MainActivity : Activity() {
         showTab(0)
         showBootDiagnostics()
         ui.post(ticker)
+        ensureMediaPermission()
+    }
+
+    /**
+     * 投递目录需要读公共 Music 下别人写进来的文件。
+     *
+     * 这条权限声明在清单里，但从来没在运行时申请过 —— 结果 granted=false，
+     * App 根本列不出 inbox 里的文件。表现就是"投递通道名存实亡"：
+     * 文件确实躺在 /sdcard/Music/FlowStudio/inbox，App 眼里却是空的，
+     * GET /inbox 也只能回 pending: []。FileObserver 没问题，
+     * 是它连目录都读不到。
+     *
+     * Android 13+ 用 READ_MEDIA_AUDIO，12 及以下用 READ_EXTERNAL_STORAGE。
+     */
+    private fun ensureMediaPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val perm = if (Build.VERSION.SDK_INT >= 33)
+            "android.permission.READ_MEDIA_AUDIO"
+        else
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        if (checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED) return
+        runCatching { requestPermissions(arrayOf(perm), REQ_MEDIA_PERM) }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_MEDIA_PERM) return
+        // 无论授权与否都补扫一次：授权了这就能把积压文件吃掉，
+        // 没授权则至少把"为什么没导入"写进日志，而不是静默无声。
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            runCatching { session.rescanInbox() }
+        } else {
+            android.util.Log.w(
+                "FlowStudio",
+                "没有音频读取权限，投递目录里的文件将无法自动导入"
+            )
+        }
     }
 
     /**

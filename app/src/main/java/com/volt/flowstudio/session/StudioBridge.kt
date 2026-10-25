@@ -5,9 +5,7 @@ import android.util.Log
 import com.volt.flowstudio.model.*
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -257,8 +255,18 @@ class StudioBridge(
             // 这边的 socket 已经超时断开，客户端只会看到一个空响应。
             client.soTimeout = 20000
 
-            val input = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
-            val requestLine = input.readLine() ?: return false
+            // 整个请求必须按**字节**处理，不能按字符。
+            //
+            // 这里曾经用 BufferedReader + CharArray(contentLength)：
+            // Content-Length 是字节数，而 CharArray 装的是字符数。
+            // ASCII 请求体 1 字节 = 1 字符，看起来没问题；一旦 body 里出现
+            // 中文（工程名、轨道名、投递文件名都是中文），3 字节才凑出 1 个字符，
+            // read() 永远填不满 contentLength 个字符 ——
+            // 循环一直等到 socket 读超时（20 秒）才返回截断的 body。
+            // 表现就是"推送超时但其实已经写进去了""导入 hang up""中文工程打不开"。
+            val input = java.io.BufferedInputStream(client.getInputStream(), 64 * 1024)
+            // 请求行与头部是纯 ASCII，按字节读到 CRLF 即可。
+            val requestLine = readAsciiLine(input) ?: return false
             val parts = requestLine.split(" ")
             if (parts.size < 2) return false
             val method = parts[0].uppercase()
@@ -267,7 +275,7 @@ class StudioBridge(
             var contentLength = 0
             var tooLarge = false
             while (true) {
-                val line = input.readLine() ?: break
+                val line = readAsciiLine(input) ?: break
                 if (line.isEmpty()) break
                 val idx = line.indexOf(':')
                 if (idx > 0) {
@@ -286,16 +294,22 @@ class StudioBridge(
                 return false
             }
 
+            // 精确读 contentLength 个**字节**，再一次性按 UTF-8 解码。
             val body = if (contentLength > 0) {
-                val buf = CharArray(contentLength)
+                val raw = ByteArray(contentLength)
                 var read = 0
                 while (read < contentLength) {
-                    val n = input.read(buf, read, contentLength - read)
+                    val n = input.read(raw, read, contentLength - read)
                     if (n < 0) break
                     read += n
                 }
-                String(buf, 0, read)
+                String(raw, 0, read, Charsets.UTF_8)
             } else ""
+            // 未读完的字节不能留到下一次路由：这条连接处理完就关，
+            // 但也把剩余数据显式丢弃，避免半截 body 影响后续解析。
+            if (body.isBlank() && contentLength > 0) {
+                Log.w(TAG, "请求体读取不完整（声明 $contentLength 字节）: $method $pathWithQuery")
+            }
 
             val out = client.getOutputStream()
             val (status, payload) = route(method, pathWithQuery, body)
@@ -328,6 +342,24 @@ class StudioBridge(
             s?.let { runCatching { it.close() } }
         }
         return false
+    }
+
+    /**
+     * 读一行 ASCII（请求行 / HTTP 头），按字节读到 CRLF。
+     *
+     * 不能用 BufferedReader.readLine()：它和后面按字节读 body 的操作
+     * 会抢同一个流，而且它会预读一大块缓冲 —— body 的前几百字节会被它吞掉。
+     * 这里手工按字节读到 \n，绝不越过头部边界。
+     */
+    private fun readAsciiLine(input: java.io.InputStream): String? {
+        val sb = StringBuilder(128)
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (b == '\n'.code) return sb.toString().trimEnd('\r')
+            // 头部只该是可见 ASCII；真出现非 ASCII 也不会让连接卡死。
+            if (sb.length < 8192) sb.append(b.toChar())
+        }
     }
 
     private fun respond(out: OutputStream, status: Int, body: JSONObject) {
@@ -490,6 +522,10 @@ class StudioBridge(
                 method == "POST" && path == "/tracks" -> handleAddTrack(body)
                 method == "PATCH" && path.startsWith("/tracks/") ->
                     handlePatchTrack(path.removePrefix("/tracks/").toIntOrNull(), body)
+                // 删轨：用户与 AI 都需要。之前只建不删，导入失败留下的空轨
+                // 在 App 里没有出路，只能靠人长按轨道头手动删。
+                method == "DELETE" && path.startsWith("/tracks/") ->
+                    handleDeleteTrack(path.removePrefix("/tracks/").toIntOrNull())
                 method == "GET" && path == "/patterns" -> 200 to patternsJson()
                 method == "PUT" && path.startsWith("/patterns/") ->
                     handlePutPattern(path.removePrefix("/patterns/").toIntOrNull(), body)
@@ -519,11 +555,21 @@ class StudioBridge(
                 method == "DELETE" && path.startsWith("/audio/") ->
                     handleDeleteAudio(path.removePrefix("/audio/").toIntOrNull())
                 // 投递目录：插件不拉起 App 也能传音频的通道。
-                // GET 查积压，DELETE 清空（文件已由监听器吃掉但残留时用）。
-                method == "GET" && path == "/inbox" -> 200 to JSONObject()
-                    .put("ok", true)
-                    .put("dir", session.inboxDir().absolutePath)
-                    .put("pending", JSONArray(session.inboxPending()))
+                // GET 查积压 + 诊断（目录能不能看见、权限够不够），
+                // POST /inbox/rescan 立刻补扫一次（权限刚授予或用户手塞文件后），
+                // DELETE 清空（文件已由监听器吃掉但残留时用）。
+                method == "GET" && path == "/inbox" -> 200 to
+                    session.inboxDiagnostics()
+                        .put("pending", JSONArray(session.inboxPending()))
+                method == "POST" && path == "/inbox/rescan" -> {
+                    val before = session.inboxPending().size
+                    runOnMain { session.rescanInbox() }
+                    Thread.sleep(600)   // 给导入线程一点时间真正开始动作
+                    val after = session.inboxPending().size
+                    200 to session.inboxDiagnostics()
+                        .put("pending", JSONArray(session.inboxPending()))
+                        .put("removed", before - after)
+                }
                 method == "DELETE" && path == "/inbox" -> {
                     val removed = session.inboxPending().size
                     session.inboxDir().listFiles { f -> f.isFile }?.forEach { runCatching { it.delete() } }
@@ -897,6 +943,44 @@ class StudioBridge(
         runOnMain { session.pushTrack(index); session.scheduleAutoSave() }
         broadcast("track", JSONObject().put("index", index))
         return 200 to JSONObject().put("ok", true).put("index", index)
+    }
+
+    /**
+     * 删除一条轨道及其全部内容（音符/片段/自动化）。
+     *
+     * 这是"导入失败留下半截空轨"的正规出路：以前桥接只能建不能删，
+     * AI 只能把空轨改名成「空轨·可删」并静音，等用户到 App 里长按删掉 ——
+     * 那等于把 AI 造成的垃圾留给人收拾。
+     */
+    private fun handleDeleteTrack(index: Int?): Pair<Int, JSONObject> {
+        if (index == null) return 400 to JSONObject().put("error", "轨道下标不合法")
+
+        var err: String? = null
+        var before = 0
+        var removedClips = 0
+        val ok = runOnMain {
+            val p = session.project
+            before = p.tracks.size
+            removedClips = p.clips.count { it.track == index }
+            session.rememberSnapshot("AI 删除轨道")
+            err = p.removeTrackAt(index)
+            if (err == null) {
+                session.pushAll()
+                session.scheduleAutoSave()
+            }
+        }
+        if (!ok) return 503 to JSONObject().put("error", "应用繁忙")
+        err?.let { return 409 to JSONObject().put("error", it) }
+
+        bumpRevision()
+        broadcast("track", JSONObject().put("deleted", index))
+        session.notifyExternalEdit("删除轨道")
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("deleted", index)
+            .put("removedClips", removedClips)
+            .put("tracks", before - 1)
+            .put("revision", revision)
     }
 
     private fun handlePutPattern(id: Int?, body: String): Pair<Int, JSONObject> {
@@ -1306,7 +1390,8 @@ class StudioBridge(
             .put("effects", fxArr)
             .put("features", JSONArray(listOf(
                 "batch", "clips.arrange", "clips.patch", "automation.upsert",
-                "pattern.create", "pattern.patch", "pattern.delete", "tracks.reorder",
+                "pattern.create", "pattern.patch", "pattern.delete", "tracks.reorder", "tracks.delete",
+                "inbox.diagnostics", "inbox.rescan",
                 "undo", "selection", "events.longpoll", "events.sse",
                 "notes.fine", "track.group", "audio.import", "audio.clips",
                 "audio.inbox", "audio.mp3"
@@ -1453,6 +1538,14 @@ class StudioBridge(
                     else -> null
                 }
             }
+            "tracks.delete" -> {
+                val i = op.optInt("index", -1)
+                when {
+                    i !in p.tracks.indices -> "轨道 $i 越界（共 ${p.tracks.size} 条）"
+                    p.tracks.size <= 1 -> "至少要留一条轨道"
+                    else -> null
+                }
+            }
             "tracks.reorder" -> {
                 val order = op.optJSONArray("order") ?: return "需要 order 数组"
                 val idx = (0 until order.length()).map { order.optInt(it, -1) }
@@ -1582,6 +1675,15 @@ class StudioBridge(
                 if (op.has("sendDelay")) t.sendDelay = op.optDouble("sendDelay").toFloat().coerceIn(0f, 1f)
                 if (op.has("transpose")) t.transpose = op.optInt("transpose", t.transpose).coerceIn(-48, 48)
                 return JSONObject().put("ok", true).put("index", index)
+            }
+            "tracks.delete" -> {
+                val i = op.optInt("index", -1)
+                val removedClips = p.clips.count { it.track == i }
+                val why = p.removeTrackAt(i)
+                if (why != null) return JSONObject().put("ok", false).put("error", why)
+                return JSONObject().put("ok", true)
+                    .put("deleted", i).put("removedClips", removedClips)
+                    .put("tracks", p.tracks.size)
             }
             "tracks.reorder" -> {
                 val order = op.getJSONArray("order")
