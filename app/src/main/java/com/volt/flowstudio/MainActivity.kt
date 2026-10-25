@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     /** 诊断条出现时内容需要额外下移的高度；由 layoutChrome 统一参与计算。 */
     private var bannerExtra = 0
     private var bannerHeight = 0
+    private var columnLayout: android.widget.LinearLayout? = null
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -83,9 +84,29 @@ class MainActivity : Activity() {
         super.onConfigurationChanged(newConfig)
         val dm = resources.displayMetrics
         val hDp = dm.heightPixels / dm.density
-        keyboardHeight = dp(if (hDp < 700f) 68 else 82)
+        val wDp = dm.widthPixels / dm.density
+        val compact = wDp >= 760f && hDp <= 700f
+        val portrait = hDp > wDp
+        keyboardHeight = dp(if (hDp < 700f) 76 else 92)
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
-        // 工具栏高度变了，已挂载页面的边距要跟着更新。
+
+        // 列内三段高度随屏幕重新分配，内容用 weight 会自动适应。
+        columnLayout?.let { c ->
+            if (c.childCount >= 4) {
+                (c.getChildAt(0).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
+                    it.height = dp(if (compact) 44 else if (portrait) 50 else 46)
+                    c.getChildAt(0).layoutParams = it
+                }
+                (c.getChildAt(2).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
+                    it.height = dp(if (compact) 62 else if (portrait) 72 else 66)
+                    c.getChildAt(2).layoutParams = it
+                }
+                (c.getChildAt(3).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
+                    it.height = dp(if (compact) 24 else 26)
+                    c.getChildAt(3).layoutParams = it
+                }
+            }
+        }
         applyPageMetrics()
         rootLayout?.requestApplyInsets()
         tabBar.invalidate()
@@ -134,44 +155,70 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- 搭界面
 
     private fun buildUi() {
+        // 结构改为纵向排列：页签 / 内容 / 底栏 / 说明。
+        // 之前全部塞进一个 FrameLayout，content 最后添加会盖住页签和底栏，
+        // insets 回调没触发时 chromeTop=0，内容直接占满全屏——截图中底栏和
+        // 页签完全消失就是这个原因。纵向布局让四段天然不重叠。
+        val dm = resources.displayMetrics
+        val hDp = dm.heightPixels / dm.density
+        val wDp = dm.widthPixels / dm.density
+        val compactLandscape = wDp >= 760f && hDp <= 700f
+        val portrait = hDp > wDp
+
+        val tabH = dp(if (compactLandscape) 44 else if (portrait) 50 else 46)
+        val transportH = dp(if (compactLandscape) 62 else if (portrait) 72 else 66)
+        val footerH = dp(if (compactLandscape) 24 else 26)
+        keyboardHeight = dp(if (hDp < 700f) 76 else 92)
+        toolBarHeight = dp(if (hDp < 700f) 38 else 42)
+
         val root = FrameLayout(this).apply { setBackgroundColor(Palette.BG) }
         root.addView(StudioBackground(this), matchParams())
-        // 1024x640dp 这类矮宽屏上，固定 92dp 键盘 + 42dp 工具栏会把卷帘挤扁。
-        val screenDp = resources.displayMetrics.heightPixels / resources.displayMetrics.density
-        keyboardHeight = dp(if (screenDp < 700f) 68 else 82)
-        toolBarHeight = dp(if (screenDp < 700f) 38 else 42)
 
-        // 结构：inset(状态栏) → 页签 44dp → 内容 → 底栏 60dp → 说明 26dp → inset(导航栏)
-        // 所有高度都从 insets 推，避免在 1024x640dp 这类宽屏上叠出一条压短内容的空白。
+        val column = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(column, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = android.view.Gravity.TOP })
+
+        // ---- 1. 页签 ----
+        tabBar = TabBar(this).apply {
+            tabs = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
+        }
+        tabBarView = tabBar
+        column.addView(tabBar, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, tabH
+        ))
+
+        // ---- 2. 内容（占满剩余高度）----
+        content = FrameLayout(this)
+        contentView = content
+        column.addView(content, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        // ---- 3. 底部走带条 ----
         transportBar = TransportBar(this).apply { bottomMode = true }
         transportBarView = transportBar
-        root.addView(transportBar, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(60)
-        ).apply { gravity = android.view.Gravity.BOTTOM })
+        column.addView(transportBar, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, transportH
+        ))
 
+        // ---- 4. 说明条 ----
         footerBar = FlowButton(this).apply {
-            text = "手势与操作指南  ·  FlowStudio 1.16"
+            text = "手势与操作指南  ·  FlowStudio 1.17"
             textSize = 9f
-            minHeight = dp(26)
-            minimumHeight = dp(26)
             setPadding(dp(14), 0, dp(14), 0)
             buttonColor = Palette.BG
             foregroundColor = Palette.TEXT_FAINT
             setOnClickListener { showGestureGuide() }
         }
-        root.addView(footerBar, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(26)
-        ).apply { gravity = android.view.Gravity.BOTTOM })
+        column.addView(footerBar, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, footerH
+        ))
 
-        tabBar = TabBar(this).apply {
-            tabs = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
-        }
-        tabBarView = tabBar
-        root.addView(tabBar, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(44)
-        ).apply { gravity = android.view.Gravity.TOP })
-
-        // 诊断条：启动有问题时显示，正常时完全隐藏
+        // ---- 诊断条：覆盖在内容顶部，不参与高度分配 ----
         banner = TextView(this).apply {
             setBackgroundColor(0xFF7A1D18.toInt())
             setTextColor(0xFFFFE4E0.toInt())
@@ -184,168 +231,98 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply { gravity = android.view.Gravity.TOP })
 
-        content = FrameLayout(this)
-        contentView = content
-        root.addView(content, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-
         rootLayout = root
-        // 真实系统栏尺寸在第一次布局前拿不到，用监听器统一算一遍。
-        // 项目零第三方依赖，这里直接用平台的 WindowInsets，不引入 androidx。
-        root.setOnApplyWindowInsetsListener { _, insets ->
-            applyInsets(insets)
-            insets
-        }
-        root.requestApplyInsets()
+        columnLayout = column
+        chromeTop = tabH
+        chromeBottom = transportH + footerH
 
-        // 0. 通道机架（FL 的骨架界面）
+        // ---- 页面 ----
+        // 0. 通道机架
         rack = ChannelRackView(this)
         content.addView(rack, matchParams())
 
-        // 1. 步进器：保留独立的大网格编辑页。
+        // 1. 步进器
         val stepsHolder = FrameLayout(this)
         steps = StepSequencerView(this)
         addToolbar(stepsHolder, "步进音序器", "点按或横向刷过格子")
-        stepsHolder.addView(steps, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = toolBarHeight })
+        stepsHolder.addView(steps, pageBodyParams())
         content.addView(stepsHolder, matchParams())
 
-        // 2. 钢琴卷帘 + 键盘 + 明确的编辑工具入口。
+        // 2. 钢琴卷帘 + 键盘
         val pianoHolder = FrameLayout(this)
         piano = PianoRollView(this)
         keys = KeyboardView(this).apply { noteCount = 24 }
         addToolbar(pianoHolder, "钢琴卷帘", "双指缩放 · 拖右缘改时长")
-        pianoHolder.addView(piano, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = toolBarHeight; bottomMargin = keyboardHeight })
+        pianoHolder.addView(piano, pageBodyParams(bottom = keyboardHeight))
         pianoHolder.addView(keys, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, keyboardHeight
         ).apply { gravity = android.view.Gravity.BOTTOM })
         content.addView(pianoHolder, matchParams())
 
-        // 3. 播放列表。
+        // 3. 播放列表
         val playlistHolder = FrameLayout(this)
         playlist = PlaylistView(this)
         addToolbar(playlistHolder, "编排时间线", "拖动片段 · 双指平移 · 标尺划循环")
-        playlistHolder.addView(playlist, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = toolBarHeight })
+        playlistHolder.addView(playlist, pageBodyParams())
         content.addView(playlistHolder, matchParams())
 
-        // 4. 混音台。
+        // 4. 混音台
         val mixerHolder = FrameLayout(this)
         mixer = MixerView(this)
         addToolbar(mixerHolder, "混音台", "点通道名调音色 · 点 FX 槽调效果")
-        mixerHolder.addView(mixer, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = toolBarHeight })
+        mixerHolder.addView(mixer, pageBodyParams())
         content.addView(mixerHolder, matchParams())
 
-        // 5. 自动化。
+        // 5. 自动化
         val autoHolder = FrameLayout(this)
         auto = AutomationView(this)
         addToolbar(autoHolder, "自动化", "绘制参数随时间变化的曲线")
-        autoHolder.addView(auto, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ).apply { topMargin = toolBarHeight })
+        autoHolder.addView(auto, pageBodyParams())
         content.addView(autoHolder, matchParams())
 
         setContentView(root)
+
+        // 系统栏：只把整列往内推，不参与高度分配，避免和布局互相打架。
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val sysTop = insets.getInsets(android.view.WindowInsets.Type.statusBars()).top
+            val sysBottom = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom
+            insetTop = sysTop
+            insetBottom = sysBottom
+            (column.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.topMargin = sysTop
+                lp.bottomMargin = sysBottom
+                lp.height = FrameLayout.LayoutParams.MATCH_PARENT
+                column.layoutParams = lp
+            }
+            (banner.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.topMargin = sysTop + tabH
+                banner.layoutParams = lp
+            }
+            insets
+        }
+        root.requestApplyInsets()
+    }
+
+    /** 页面正文：顶部避开工具栏，底部可留出键盘高度。 */
+    private fun pageBodyParams(bottom: Int = 0) = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+    ).apply {
+        topMargin = toolBarHeight
+        bottomMargin = bottom
     }
 
     /**
-     * 由真实系统栏 insets 推出四段高度。
+     * 旧的 FrameLayout 绝对定位方案已废弃。
      *
-     * 之前固定写死 topMargin=20 / bottomMargin=34，在 1024x640dp 的宽屏上
-     * 会与系统导航栏叠加，既压短内容又把底栏推离底边——这是"位置不对"的根因。
+     * 它依赖 insets 回调把 margin 写进各个子 View；回调没触发时 margin 保持 0，
+     * content 就会盖住页签与底栏（截图里的现象）。现在改为 LinearLayout 纵向排列，
+     * 高度由 weight 决定，系统栏用整列 margin 处理。这里保留空实现只为兼容旧调用点。
      */
     private fun applyInsets(insets: android.view.WindowInsets) {
         val sysTop = insets.getInsets(android.view.WindowInsets.Type.statusBars()).top
         val sysBottom = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom
         insetTop = sysTop
         insetBottom = sysBottom
-        layoutChrome()
-    }
-
-    /**
-     * 按屏幕真实宽高分配高度。
-     *
-     * 设备是 2560x1600 物理像素 / 400dpi，横屏可用高度只有 640dp。
-     * 之前固定 44+60+26=130dp 的 chrome 会吃掉五分之一屏高，内容显得局促。
-     * 这里改成按屏幕高度比例给，并区分横屏/竖屏三档。
-     */
-    private fun metrics(): Triple<Int, Int, Int> {
-        val dm = resources.displayMetrics
-        val wDp = dm.widthPixels / dm.density
-        val hDp = dm.heightPixels / dm.density
-        val compactLandscape = wDp >= 760f && hDp <= 700f
-        val portrait = hDp > wDp
-        val tabH = dp(
-            when {
-                compactLandscape -> 42
-                portrait -> 48
-                else -> 46
-            }
-        )
-        val transportH = dp(
-            when {
-                compactLandscape -> 62
-                portrait -> 70
-                else -> 66
-            }
-        )
-        val footerH = dp(if (compactLandscape) 24 else 26)
-        return Triple(tabH, transportH, footerH)
-    }
-
-    private fun layoutChrome() {
-        val (tabH, transportH, footerH) = metrics()
-        val gap = dp(2)
-        chromeTop = insetTop + tabH + gap
-        chromeBottom = insetBottom + transportH + footerH + gap
-
-        rootLayout?.let { root ->
-            tabBarView?.let { bar ->
-                val lp = bar.layoutParams as FrameLayout.LayoutParams
-                lp.gravity = android.view.Gravity.TOP
-                lp.topMargin = insetTop
-                lp.bottomMargin = 0
-                lp.height = tabH
-                bar.layoutParams = lp
-            }
-            contentView?.let { c ->
-                val lp = c.layoutParams as FrameLayout.LayoutParams
-                lp.topMargin = chromeTop + bannerExtra
-                lp.bottomMargin = chromeBottom
-                // 横屏窄边距留给网格，竖屏加大留白避免单列内容贴边。
-                val side = if (resources.configuration.orientation ==
-                    android.content.res.Configuration.ORIENTATION_PORTRAIT) dp(12) else dp(6)
-                lp.leftMargin = side
-                lp.rightMargin = side
-                c.layoutParams = lp
-            }
-            transportBarView?.let { t ->
-                val lp = t.layoutParams as FrameLayout.LayoutParams
-                lp.gravity = android.view.Gravity.BOTTOM
-                lp.bottomMargin = insetBottom + footerH
-                lp.height = transportH
-                t.layoutParams = lp
-            }
-            footerBar?.let { f ->
-                val lp = f.layoutParams as FrameLayout.LayoutParams
-                lp.gravity = android.view.Gravity.BOTTOM
-                lp.bottomMargin = insetBottom
-                lp.height = footerH
-                f.layoutParams = lp
-            }
-            banner?.let { b ->
-                val lp = b.layoutParams as FrameLayout.LayoutParams
-                lp.topMargin = insetTop + tabH + dp(2)
-                b.layoutParams = lp
-            }
-        }
     }
 
     private fun matchParams() = FrameLayout.LayoutParams(
@@ -899,12 +876,11 @@ class MainActivity : Activity() {
         if (err.isNullOrBlank()) return
         banner.text = "⚠ $err  （点这里看详情）"
         banner.visibility = View.VISIBLE
-        // 诊断条出现后重新走一遍统一布局：内容下移的量取决于它自身高度，
-        // 不能写死 46dp —— 文案长度不同，写死必然压到别的元素。
-        banner.post {
-            bannerHeight = banner.height
-            bannerExtra = if (bannerHeight > 0) bannerHeight + dp(6) else 0
-            layoutChrome()
+        // 诊断条是覆盖层：贴在页签下方显示，不参与纵向高度分配，
+        // 也就不会再出现"改一处高度、另一处被裁掉"的连锁问题。
+        (banner.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+            lp.topMargin = insetTop + (tabBarView?.height ?: dp(46))
+            banner.layoutParams = lp
         }
     }
 

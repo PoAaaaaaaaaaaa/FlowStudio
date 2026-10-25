@@ -14,6 +14,15 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.18 更新
+
+- 修复根因：整屏塞在一个 FrameLayout 里，content 最后添加会盖住页签与底栏；insets 回调未触发时 chromeTop=0，内容占满全屏。
+- 改为纵向 LinearLayout：页签 / 内容(weight=1) / 走带条 / 说明条，四段天然不重叠。
+- 系统栏只作为整列 margin，不再参与高度分配；诊断条改为覆盖层，不影响布局。
+- 机架名称列加硬上限（宽屏 190dp、竖屏 110dp），步进网格不再被挤成一条。
+- 机架行高上限收到 56dp，8 条轨道不再把「+ 添加通道」挤出屏幕。
+- 旋转后重算列内三段高度与页面边距。
+
 ## 1.17 更新
 
 - 布局按 2560x1600 / 400dpi（横屏 1024x640dp）重新校准：顶栏、内容、底栏按屏幕比例分档。

@@ -94,9 +94,10 @@ class ChannelRackView @JvmOverloads constructor(
         // 列布局：屏宽的分配比例
         colName = w * 0.00f
         val portrait = w < dp(600f)
-        // 名称列按比例增长但设上限：2560px/1024dp 宽屏下 21% 会浪费一百多 dp。
-        val nameW = if (portrait) max(dp(100f), w * 0.24f)
-        else max(dp(140f), min(w * 0.26f, dp(230f)))
+        // 名称列必须有硬上限：截图里它占了近一半宽度，把步进格压得只剩一条。
+        // 步进网格才是主操作区，名称够读即可。
+        val nameW = if (portrait) min(w * 0.26f, dp(110f))
+        else min(w * 0.20f, dp(190f)).coerceAtLeast(dp(120f))
         colMute = nameW
         colSolo = colMute + dp(if (portrait) 32f else 36f)
         colVol = colSolo + dp(if (portrait) 32f else 36f)
@@ -111,7 +112,9 @@ class ChannelRackView @JvmOverloads constructor(
         }
 
         val availH = h - headerH - addBtnH
-        rowHeight = (availH / rows.coerceAtMost(8)).coerceIn(dp(38f), dp(64f))
+        // 行高上限收到 56dp：宽屏上原来的 64dp 会让 8 条轨道刚好溢出一行，
+        // 底部「添加通道」就被挤到屏幕之外。
+        rowHeight = (availH / rows.coerceAtMost(10)).coerceIn(dp(34f), dp(56f))
 
         // ---- 顶部：样式选择 + 摇摆 ----
         rect(canvas, 0f, 0f, w, headerH, Palette.SURFACE)
