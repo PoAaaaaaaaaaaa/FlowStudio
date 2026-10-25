@@ -14,6 +14,24 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.26 更新
+
+- **修令牌镜像静默失败（401 的根因）**：令牌的镜像同步原来整体包在一个
+  `runCatching` 里，任何一步抛异常都静默跳过 —— 表现就是"桥接在跑、
+  Music/FlowStudio 下镜像全没了、插件永远 401"，日志里一行线索都没有。
+  现在镜像拆成独立 `syncMirrors()`，四个目标各自 try-catch，
+  失败原因逐条记进 `mirrorStatus`，`/status/health` 直接可读
+  （新增 `tokenMirrors` 检查项）。
+- **镜像目标加 Download 兜底**：`Download/.flowstudio_token`（点号开头不进媒体扫描）。
+  实测 1.25 在这台设备上 Music 镜像没写出来，Download 往往仍可写。
+- **onResume 重同步**：有些系统共享存储的挂载/授权晚于 Application onCreate，
+  那时写镜像会失败。回到前台时存储一定就绪，补一次同步（幂等，几毫秒）。
+  App 只要被打开过一次，镜像就是新的。
+- 令牌本体保持稳定：只在私有文件不存在时生成，覆盖安装/重启都复用，
+  不再出现"每次启动换令牌把插件踢下线"。
+- 插件：令牌路径清单加上 Download 兜底与 bridge.json（能同时解析出端口）；
+  bridge.json 里的端口参与 discover 探测（App 换过端口也能救回）。
+
 ## 1.25 更新
 
 - **修"不能新开工程"**：根因是 UI 入口缺失，不是功能坏了 —— 「工程」按钮

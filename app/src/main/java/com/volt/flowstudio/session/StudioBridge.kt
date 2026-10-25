@@ -158,68 +158,96 @@ class StudioBridge(
     }
 
     /**
-     * 访问令牌。首次启动生成。
+     * 访问令牌。首次启动生成，之后一直复用 —— 令牌必须稳定，
+     * 插件拿着旧值重连是常态；每次启动换新值等于把所有外部工具踢下线。
      *
-     * 同时写两个地方：
-     *   1. 私有目录 files/bridge_token —— 应用自己用，最安全
-     *   2. 外部私有目录 Android/data/<pkg>/files/bridge_token
-     *      —— 容器里的工具进程能读到（它是同一个用户自己的文件）
-     *
-     * 只写私有目录的话，插件在容器里根本拿不到令牌，
-     * 于是"桥接在跑但插件连不上"，看起来像功能没做。
+     * 这里只做两件事：读私有文件，没有就生成并写回。
+     * 镜像同步是独立函数 [syncMirrors]，失败单独记录、单独暴露，
+     * 不会连累令牌本身 —— 以前镜像段整个被一个大 runCatching 包着，
+     * 任何一步抛异常都静默跳过，表现就是"桥接在跑、镜像全没了、
+     * 插件永远 401"，而且日志里一行线索都没有。
      */
     val token: String by lazy {
         val primary = File(context.filesDir, TOKEN_FILE)
         val existing = runCatching { primary.readText().trim() }.getOrNull()
             ?.takeIf { it.length >= 16 }
+        existing ?: generateToken(primary)
+    }
 
-        val t = existing ?: generateToken(primary)
+    /** 每个镜像位置的同步结果，诊断接口直接可读。 */
+    @Volatile
+    var mirrorStatus: List<String> = emptyList()
+        private set
 
-        // 同步到几个外部工具够得着的位置。
-        // Android/data 在部分系统上被文件管理器隐藏，所以公共 Music 目录也放一份。
-        // 这不是"泄露"：都是本机同一个用户的文件，且令牌只能访问本机回环接口。
+    /**
+     * 把令牌同步到外部工具够得着的位置。
+     *
+     * 每个目标独立 try-catch：一个失败不影响其它，失败原因留在
+     * [mirrorStatus] 里，/status/health 能看到 —— 镜像没写出来
+     * 必须是"可诊断的"，不能只剩一句连不上。
+     *
+     * 目标（按可靠度排序）：
+     *   1. App 外部私有目录 —— 同一 App 的私有存储，一定可写，
+     *      但 Android 11+ 容器端可能读不到（Android/data 受限）
+     *   2. Music/FlowStudio/bridge_token —— 公共目录，容器可读；
+     *      1.25 实测某些机型这段写入失败，所以不能只靠它
+     *   3. Download/.flowstudio_token —— Download 一定可写，
+     *      文件管理器不隐藏；点号开头不进媒体扫描
+     *   4. Music/FlowStudio/bridge.json —— 端口+令牌+版本一份文件，
+     *      插件的快路径
+     */
+    fun syncMirrors() {
+        val t = token
+        val status = mutableListOf<String>()
+
+        // 1. 外部私有目录
         runCatching {
-            val mirrors = buildList {
-                context.getExternalFilesDir(null)?.let { add(File(it, TOKEN_FILE)) }
-                runCatching {
-                    add(File(
-                        android.os.Environment.getExternalStoragePublicDirectory(
-                            android.os.Environment.DIRECTORY_MUSIC
-                        ),
-                        "FlowStudio/bridge_token"
-                    ))
-                }
+            context.getExternalFilesDir(null)?.let { dir ->
+                val f = File(dir, TOKEN_FILE)
+                f.parentFile?.mkdirs()
+                if (f.readText().trim() != t) f.writeText(t)
+                status.add("ok: ${f.absolutePath}")
             }
-            for (m in mirrors) {
-                val ok = runCatching {
-                    m.parentFile?.mkdirs()
-                    val cur = if (m.isFile) m.readText().trim() else null
-                    if (cur != t) m.writeText(t)
-                    m.isFile && m.length() > 0
-                }.getOrDefault(false)
-                // bridge.json：一份文件带全部连接信息（端口+令牌+协议版本）。
-                // 插件读它就能直连，不用猜端口、不用逐路径试令牌。
-                // 放在 Music/FlowStudio/ 下，与令牌镜像同目录，外部工具一眼能看到。
-                runCatching {
-                    val info = File(
-                        android.os.Environment.getExternalStoragePublicDirectory(
-                            android.os.Environment.DIRECTORY_MUSIC
-                        ),
-                        "FlowStudio/bridge.json"
-                    )
-                    info.parentFile?.mkdirs()
-                    info.writeText("""{"app":"FlowStudio","port":$port,"token":"$t","protocol":2,"version":"${session.versionName()}"}""")
-                }
-                // 镜像是"插件能不能连上"的前提，失败必须留下痕迹，
-                // 否则只剩一句"连不上"，排查时无从下手。
-                if (ok) {
-                    android.util.Log.i(TAG, "令牌已镜像到 ${m.absolutePath}")
-                } else {
-                    android.util.Log.w(TAG, "令牌镜像失败: ${m.absolutePath}")
-                }
-            }
+        }.onFailure { status.add("fail(external-private): ${it.message}") }
+
+        // 2 + 4. 公共 Music 目录（bridge_token 与 bridge.json）
+        val musicDir = runCatching {
+            File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_MUSIC
+                ),
+                "FlowStudio"
+            )
+        }.getOrNull()
+        if (musicDir == null) {
+            status.add("fail(music): getExternalStoragePublicDirectory 返回 null")
+        } else {
+            runCatching {
+                musicDir.mkdirs()
+                val f = File(musicDir, TOKEN_FILE)
+                if (f.readText().trim() != t) f.writeText(t)
+                status.add("ok: ${f.absolutePath}")
+            }.onFailure { status.add("fail(music-token): ${it.message}") }
+
+            runCatching {
+                val info = File(musicDir, "bridge.json")
+                info.writeText("""{"app":"FlowStudio","port":$port,"token":"$t","protocol":2,"version":"${session.versionName()}"}""")
+                status.add("ok: ${info.absolutePath}")
+            }.onFailure { status.add("fail(bridge.json): ${it.message}") }
         }
-        t
+
+        // 3. Download 兜底：Music 不可写时它往往仍可写
+        runCatching {
+            val dl = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS
+            )
+            val f = File(dl, ".flowstudio_token")
+            if (f.readText().trim() != t) f.writeText(t)
+            status.add("ok: ${f.absolutePath}")
+        }.onFailure { status.add("fail(download): ${it.message}") }
+
+        mirrorStatus = status
+        status.forEach { android.util.Log.i(TAG, "镜像: $it") }
     }
 
     private fun generateToken(f: File): String {
@@ -234,13 +262,9 @@ class StudioBridge(
         if (running) return true
         stop.set(false)
 
-        // 主动求值一次令牌。
-        //
-        // token 是 by lazy 的，镜像到外部目录的副作用写在初始化块里。
-        // 如果没有人访问过 token，那段副作用永远不会执行 ——
-        // 表现就是"桥接在跑，但外部工具找不到令牌文件，插件连不上"。
-        // 这里的取值不是多余的：它就是触发那段初始化。
-        runCatching { token.length }
+        // 令牌生成 + 镜像同步。镜像失败只记状态，不连累桥接启动。
+        runCatching { syncMirrors() }
+            .onFailure { Log.e(TAG, "镜像同步异常", it) }
         var bound: ServerSocket? = null
         var p = preferredPort
         // 端口被占就往后找，最多试 10 个
