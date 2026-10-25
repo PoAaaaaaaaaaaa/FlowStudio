@@ -149,6 +149,16 @@ class NativeEngine private constructor() {
 
     fun clearSample() = withHandle { nativeClearSample(it) }
 
+    // ---- 伴奏音频轨：交织立体声，按工程时间轴线性播放 ----
+    fun setBackingTrack(data: FloatArray, frames: Int, sampleRate: Int,
+                        startTick: Double, gain: Float) =
+        withHandle { nativeSetBackingTrack(it, data, frames, sampleRate, startTick, gain) }
+
+    fun clearBackingTrack() = withHandle { nativeClearBackingTrack(it) }
+
+    fun setBackingGain(gain: Float, mute: Boolean) =
+        withHandle { nativeSetBackingGain(it, gain, mute) }
+
     // ---------------- JNI ----------------
     private external fun nativeCreate(unused: Int): Long
     private external fun nativeDestroy(handle: Long)
@@ -185,5 +195,10 @@ class NativeEngine private constructor() {
     private external fun nativeSetAutomation(handle: Long, meta: IntArray, ticks: IntArray, values: FloatArray)
     private external fun nativeRenderOffline(handle: Long, startTick: Double, endTick: Double, sampleRate: Int): FloatArray?
     private external fun nativeLoadSample(handle: Long, data: FloatArray, sampleRate: Int, rootNote: Int)
+    private external fun nativeSetBackingTrack(handle: Long, data: FloatArray, frames: Int,
+                                               sampleRate: Int, startTick: Double, gain: Float)
+    private external fun nativeClearBackingTrack(handle: Long)
+    private external fun nativeSetBackingGain(handle: Long, gain: Float, mute: Boolean)
     private external fun nativeClearSample(handle: Long)
 }
+

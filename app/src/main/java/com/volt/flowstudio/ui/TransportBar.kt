@@ -93,19 +93,10 @@ class TransportBar @JvmOverloads constructor(
             outline(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f),
                 Palette.withAlpha(Palette.LINE, 180), dp(16f), dp(0.8f))
             if (playing) {
-                // 播放中：底部一条缓慢移动的琥珀光，安静但有生命感。
-                // 用三段宽度不同的渐变叠出柔边，避免出现硬切色块。
-                val t = (System.currentTimeMillis() % 2600L) / 2600f
-                val cx = dp(8f) + (w - dp(16f)) * t
-                for (i in 0..2) {
-                    val spread = dp(26f) + i * dp(26f)
-                    val alpha = 34 - i * 10
-                    val l = (cx - spread).coerceAtLeast(dp(8f))
-                    val r = (cx + spread).coerceAtMost(w - dp(8f))
-                    if (r > l) rect(canvas, l, dp(4f), r, dp(6f),
-                        Palette.withAlpha(Palette.ACCENT, alpha), dp(1f))
-                }
-                postInvalidateOnAnimation()
+                // 播放态只留一条静止的细指示线，不再做流光。
+                // 动画光带在停手时也会持续重绘，是画面"吵"和耗电的来源之一。
+                rect(canvas, dp(8f) + dp(16f), dp(4f), dp(8f) + dp(16f) + dp(52f), dp(5.2f),
+                    Palette.withAlpha(Palette.ACCENT, 120), dp(1f))
             }
         } else {
             rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
@@ -121,9 +112,9 @@ class TransportBar @JvmOverloads constructor(
     private fun drawBottom(canvas: Canvas, w: Float, h: Float) {
         val bh = h - dp(10f)
         val top = dp(5f)
-        val mainW = dp(56f)
-        val playW = dp(68f)
-        val gap = dp(10f)
+        val mainW = dp(44f)
+        val playW = dp(56f)
+        val gap = dp(8f)
         val groupW = mainW * 3 + playW + gap * 3
 
         // 三段式：左信息 / 中按钮组 / 右工具。
@@ -142,7 +133,11 @@ class TransportBar @JvmOverloads constructor(
         gx += mainW + gap
 
         box(Control.PLAY, gx, top, playW, bh)
-        drawButton(canvas, Control.PLAY, if (playing) Palette.ACCENT else Palette.ACCENT_DIM)
+        // 播放键用"描边 + 图标"，不再整块填色：整块高饱和色块是最抢眼的部分。
+        val pr = boxes.getValue(Control.PLAY)
+        rect(canvas, pr[0], pr[1], pr[2], pr[3], Palette.PANEL_HI, dp(10f))
+        outline(canvas, pr[0], pr[1], pr[2], pr[3],
+            if (playing) Palette.ACCENT else Palette.withAlpha(Palette.LINE, 170), dp(10f), dp(1.2f))
         drawPlayIcon(canvas)
         gx += playW + gap
 
@@ -252,7 +247,7 @@ class TransportBar @JvmOverloads constructor(
             path.lineTo(r[0] + pw * 0.38f, top + bh * 0.76f)
             path.lineTo(r[0] + pw * 0.72f, top + bh / 2f)
             path.close()
-            b.fill.color = Palette.TEXT
+            b.fill.color = if (playing) Palette.ACCENT else Palette.TEXT
             b.fill.style = android.graphics.Paint.Style.FILL
             canvas.drawPath(path, b.fill)
         }
@@ -292,13 +287,9 @@ class TransportBar @JvmOverloads constructor(
 
     private fun drawButton(canvas: Canvas, key: Control, color: Int) {
         val r = boxes.getValue(key)
-        if (key == Control.PLAY && playing) {
-            rect(canvas, r[0] - dp(3f), r[1] - dp(3f), r[2] + dp(3f), r[3] + dp(3f),
-                Palette.withAlpha(Palette.ACCENT, 36), dp(14f))
-        }
-        rect(canvas, r[0], r[1], r[2], r[3], if (pressed == key) Palette.ACCENT_DIM else color, dp(12f))
+        rect(canvas, r[0], r[1], r[2], r[3], if (pressed == key) Palette.ACCENT_DIM else color, dp(10f))
         if (key != Control.PLAY && key != Control.EXPORT) {
-            outline(canvas, r[0], r[1], r[2], r[3], Palette.withAlpha(Palette.LINE, 150), dp(12f), dp(0.7f))
+            outline(canvas, r[0], r[1], r[2], r[3], Palette.withAlpha(Palette.LINE, 120), dp(10f), dp(0.6f))
         }
     }
 

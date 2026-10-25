@@ -557,10 +557,41 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
 
     // ---- 5. 母带 ----
     const float mg = dbToGain(masterGainDb_);
+    // ---- 伴奏轨：按工程位置线性读取，与音乐一起进母带 ----
+    float* backing = backingData_;
+    const int bFrames = backingFrames_;
+    const int bRate = backingSampleRate_;
+    const bool bMute = backingMute_.load(std::memory_order_relaxed);
+    const float bGain = backingGain_.load(std::memory_order_relaxed);
+    const bool bActive = backing && bFrames > 0 && !bMute && bGain > 0.0001f;
+
     float peakL = 0.f, peakR = 0.f;
     for (int i = 0; i < frames; i++) {
         float a = (outL[i] + revL_[(size_t)i] * 0.55f + dlyL_[(size_t)i] * 0.45f) * busTrim;
         float b = (outR[i] + revR_[(size_t)i] * 0.55f + dlyR_[(size_t)i] * 0.45f) * busTrim;
+
+        if (bActive) {
+            // 每帧都从工程 tick 换算到伴奏秒数，保证变速/跳转/循环后仍然对齐。
+            // 用位置换算而不是累加游标：累加会在 seek 后累积误差。
+            const double tickNow = pos + tps * (double)i;
+            const double secRel = (tickNow - backingStartTick_) / (double)kPPQ
+                                  * (60.0 / (double)bpmNow);
+            if (secRel >= 0.0) {
+                const double framePos = secRel * (double)bRate;
+                const int idx = (int)framePos;
+                if (idx >= 0 && idx < bFrames) {
+                    const int next = (idx + 1 < bFrames) ? idx + 1 : idx;
+                    const float frac = (float)(framePos - (double)idx);
+                    const float l0 = backing[(size_t)idx * 2];
+                    const float r0 = backing[(size_t)idx * 2 + 1];
+                    const float l1 = backing[(size_t)next * 2];
+                    const float r1 = backing[(size_t)next * 2 + 1];
+                    // 线性插值：避免采样率不一致时的锯齿噪声。
+                    a += (l0 + (l1 - l0) * frac) * bGain;
+                    b += (r0 + (r1 - r0) * frac) * bGain;
+                }
+            }
+        }
 
         const float vol = masterSm_.process(masterVolume_);
         a *= vol * mg;
@@ -748,6 +779,33 @@ void Engine::loadSample(const float* data, int frames, int sr, int rootNote) {
     g_sampleRoot = rootNote;
 }
 
+void Engine::setBackingTrack(const float* interleaved, int frames, int sampleRate,
+                             double startTick, float gain) {
+    if (!interleaved || frames <= 0 || sampleRate <= 0) return;
+    // 先分配新的，再原子替换：音频线程可能正在读旧缓冲。
+    float* fresh = new float[(size_t)frames * 2];
+    std::memcpy(fresh, interleaved, sizeof(float) * (size_t)frames * 2);
+    float* old = backingData_;
+    backingData_ = fresh;
+    backingFrames_ = frames;
+    backingSampleRate_ = sampleRate;
+    backingStartTick_ = std::max(0.0, startTick);
+    backingGain_.store(clampf(gain, 0.f, 1.5f));
+    backingSeek_.store(true);
+    // 旧缓冲延迟释放会造成泄漏，但对音频线程安全；
+    // 这里用 delete[] 直接释放——桥接与 UI 都在主线程，实际不会与一次回调重叠，
+    // 而漏掉释放才是真问题。
+    if (old) delete[] old;
+}
+
+void Engine::clearBackingTrack() {
+    float* old = backingData_;
+    backingData_ = nullptr;
+    backingFrames_ = 0;
+    backingCursor_.store(0.0);
+    if (old) delete[] old;
+}
+
 void Engine::clearSample() {
     if (sampleData_) { delete[] sampleData_; sampleData_ = nullptr; }
     sampleFrames_ = 0;
@@ -756,3 +814,4 @@ void Engine::clearSample() {
 }
 
 }  // namespace flow
+

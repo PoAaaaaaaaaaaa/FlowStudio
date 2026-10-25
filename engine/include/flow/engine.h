@@ -150,6 +150,17 @@ public:
     void clearSample();
     bool hasSample() const { return sampleFrames_ > 0; }
 
+    // ---- 伴奏音频轨（backing track）----
+    // 与采样器不同：伴奏按"工程时间轴"线性播放，不跟随音高，
+    // 用来把一首完整伴奏/人声铺在编曲下面，实现"音乐 + 音频一起播"。
+    // 立体声交织数据，offset 是它在时间线上的起始 tick。
+    void setBackingTrack(const float* interleaved, int frames, int sampleRate,
+                         double startTick, float gain);
+    void clearBackingTrack();
+    bool hasBackingTrack() const { return backingFrames_ > 0; }
+    void setBackingTrackGain(float gain01) { backingGain_.store(gain01); }
+    void setBackingTrackMute(bool mute) { backingMute_.store(mute); }
+
     // ---- 音频回调入口 ----
     // 直接写交织立体声，内部只用预分配缓冲，绝不 malloc —— 这是音频线程的硬要求。
     void renderInterleaved(float* stereoOut, int frames);
@@ -228,6 +239,18 @@ private:
     int sampleFrames_ = 0;
     int sampleRateRoot_ = 48000;
     int sampleRoot_ = 60;
+
+    // 伴奏轨：预分配、音频线程只读。切换时用原子指针交换，避免撕裂。
+    float* backingData_ = nullptr;      // 交织立体声
+    int backingFrames_ = 0;
+    int backingSampleRate_ = 48000;
+    double backingStartTick_ = 0.0;
+    std::atomic<float> backingGain_{1.f};
+    std::atomic<bool> backingMute_{false};
+    /** 伴奏读取位置（秒），由工程位置换算，暂停时也要能对齐。 */
+    std::atomic<double> backingCursor_{0.0};
+    std::atomic<bool> backingSeek_{true};
 };
 
 }  // namespace flow
+

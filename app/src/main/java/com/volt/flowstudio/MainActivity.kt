@@ -26,7 +26,7 @@ class MainActivity : Activity() {
 
     // 视图
     private lateinit var transportBar: TransportBar
-    private lateinit var tabBar: TabBar
+    private var tabBar: TabBar? = null
     private lateinit var content: FrameLayout
     private lateinit var steps: StepSequencerView
     private lateinit var piano: PianoRollView
@@ -54,7 +54,21 @@ class MainActivity : Activity() {
     /** 诊断条出现时内容需要额外下移的高度；由 layoutChrome 统一参与计算。 */
     private var bannerExtra = 0
     private var bannerHeight = 0
+    private val REQ_PICK_AUDIO = 4101
     private var columnLayout: android.widget.LinearLayout? = null
+    private var navBar: android.widget.LinearLayout? = null
+    private var navMenuButton: FlowButton? = null
+    private var navTitle: TextView? = null
+    private var navSubtitle: TextView? = null
+    private val tabTitles = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
+    private val tabHints = listOf(
+        "点格子写音 · 长按通道管理",
+        "16 格步进编辑",
+        "钢琴卷帘 · 双指缩放",
+        "时间线编排 · 标尺划循环",
+        "混音台 · 推子与效果",
+        "自动化曲线"
+    )
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -94,22 +108,22 @@ class MainActivity : Activity() {
         columnLayout?.let { c ->
             if (c.childCount >= 4) {
                 (c.getChildAt(0).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
-                    it.height = dp(if (compact) 44 else if (portrait) 50 else 46)
+                    it.height = dp(if (compact) 42 else if (portrait) 48 else 44)
                     c.getChildAt(0).layoutParams = it
                 }
                 (c.getChildAt(2).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
-                    it.height = dp(if (compact) 62 else if (portrait) 72 else 66)
+                    it.height = dp(if (compact) 52 else if (portrait) 58 else 54)
                     c.getChildAt(2).layoutParams = it
                 }
                 (c.getChildAt(3).layoutParams as? android.widget.LinearLayout.LayoutParams)?.let {
-                    it.height = dp(if (compact) 24 else 26)
+                    it.height = dp(if (compact) 20 else 22)
                     c.getChildAt(3).layoutParams = it
                 }
             }
         }
         applyPageMetrics()
         rootLayout?.requestApplyInsets()
-        tabBar.invalidate()
+        tabBar?.invalidate()
         transportBar.invalidate()
     }
 
@@ -165,9 +179,9 @@ class MainActivity : Activity() {
         val compactLandscape = wDp >= 760f && hDp <= 700f
         val portrait = hDp > wDp
 
-        val tabH = dp(if (compactLandscape) 44 else if (portrait) 50 else 46)
-        val transportH = dp(if (compactLandscape) 62 else if (portrait) 72 else 66)
-        val footerH = dp(if (compactLandscape) 24 else 26)
+        val tabH = dp(if (compactLandscape) 42 else if (portrait) 48 else 44)
+        val transportH = dp(if (compactLandscape) 52 else if (portrait) 58 else 54)
+        val footerH = dp(if (compactLandscape) 20 else 22)
         keyboardHeight = dp(if (hDp < 700f) 76 else 92)
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
 
@@ -182,12 +196,53 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply { gravity = android.view.Gravity.TOP })
 
-        // ---- 1. 页签 ----
-        tabBar = TabBar(this).apply {
-            tabs = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
+        // ---- 1. 汉堡导航：一行显示当前页，点开切换 ----
+        // 之前六个页签横排，占掉一整行高度且在小屏上字很挤。
+        // 现在只留「☰ 当前页」，点击弹出列表，切换走 showTab。
+        tabBarView = null
+        val bar = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, dp(8), 0)
+            setBackgroundColor(Palette.SURFACE)
         }
-        tabBarView = tabBar
-        column.addView(tabBar, android.widget.LinearLayout.LayoutParams(
+        navBar = bar
+        navMenuButton = FlowButton(this).apply {
+            text = "☰"
+            textSize = 16f
+            buttonColor = Palette.SURFACE
+            foregroundColor = Palette.TEXT
+            setPadding(0, 0, 0, 0)
+            minWidth = dp(44)
+            minHeight = dp(36)
+            minimumWidth = dp(44)
+            minimumHeight = dp(36)
+            setOnClickListener { showNavMenu() }
+        }
+        bar.addView(navMenuButton, android.widget.LinearLayout.LayoutParams(
+            dp(44), dp(36)
+        ).apply { marginEnd = dp(4) })
+        navTitle = TextView(this).apply {
+            text = tabTitles[0]
+            setTextColor(Palette.TEXT)
+            textSize = 13f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(6), 0, 0, 0)
+        }
+        bar.addView(navTitle, android.widget.LinearLayout.LayoutParams(
+            0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+        navSubtitle = TextView(this).apply {
+            text = ""
+            setTextColor(Palette.TEXT_FAINT)
+            textSize = 9f
+            setPadding(0, 0, dp(8), 0)
+        }
+        bar.addView(navSubtitle, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+        column.addView(bar, android.widget.LinearLayout.LayoutParams(
             android.widget.LinearLayout.LayoutParams.MATCH_PARENT, tabH
         ))
 
@@ -427,7 +482,7 @@ class MainActivity : Activity() {
         transportBar.onBpmTap = { showBpmDialog() }
         transportBar.onMore = { showMoreDialog() }
 
-        tabBar.onTabSelected = { showTab(it) }
+        // 页签已由汉堡导航替代，无需再绑定。
 
         // ---- 通道机架 ----
         rack.onSelectTrack = { idx ->
@@ -622,26 +677,87 @@ class MainActivity : Activity() {
         refreshKeyboardForTrack()
     }
 
+    /**
+     * 切换页面。
+     *
+     * 之前每次切换都做三件昂贵的多余事：透明度动画、全量 refreshAll、
+     * 以及重建工具栏 actions。切换一个页签不该重推整首工程 ——
+     * 那会在工程大时造成肉眼可见的卡顿。现在只做可见性切换 + 轻量刷新。
+     */
     private fun showTab(index: Int) {
         if (index !in 0 until content.childCount) return
+        if (index == currentTab && content.getChildAt(index).visibility == View.VISIBLE) return
         currentTab = index
-        for (i in 0 until content.childCount) {
-            val page = content.getChildAt(i)
+        content.getChildAt(index).let { page ->
             page.animate().cancel()
-            page.visibility = if (i == index) View.VISIBLE else View.GONE
             page.alpha = 1f
             page.translationX = 0f
         }
-        content.getChildAt(index).animate().alpha(0.65f).alpha(1f).setDuration(130L).start()
+        for (i in 0 until content.childCount) {
+            val page = content.getChildAt(i)
+            val visible = i == index
+            if (page.visibility != (if (visible) View.VISIBLE else View.GONE)) {
+                page.animate().cancel()
+                page.visibility = if (visible) View.VISIBLE else View.GONE
+            }
+        }
+        // 只更新与当前页相关的几条数据，不整首重推。
+        lightRefresh(index)
         ((content.getChildAt(index) as? FrameLayout)?.getChildAt(0) as? EditorToolbar)?.let { toolbar ->
             when (index) {
                 2 -> configurePianoTools(toolbar)
                 3 -> configurePlaylistTools(toolbar)
             }
         }
-        tabBar.selected = index
-        tabBar.invalidate()
-        refreshAll(session.project)
+        navTitle?.text = tabTitles[index]
+        navSubtitle?.text = tabHints.getOrElse(index) { "" }
+    }
+
+    /** 汉堡菜单：列出全部页面，选中即切换。切换本身不再有动画延迟。 */
+    private fun showNavMenu() {
+        val items = tabTitles.mapIndexed { i, name ->
+            if (i == currentTab) "$name  ·  当前" else name
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("切换页面")
+            .setItems(items) { _, which -> showTab(which) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 切换页面时的最小刷新：只动需要的那几个 View。 */
+    private fun lightRefresh(index: Int) {
+        val p = session.project
+        when (index) {
+            0 -> {
+                rack.project = p
+                rack.currentPatternIndex = p.currentPattern
+                rack.selectedTrack = p.selectedTrack
+                rack.invalidate()
+            }
+            1 -> {
+                steps.pattern = p.patternAt(p.currentPattern)
+                steps.trackNames = p.tracks.map { it.name }
+                steps.trackColors = p.tracks.indices.map { Palette.trackColor(it) }
+                steps.invalidate()
+            }
+            2 -> {
+                piano.pattern = p.patternAt(p.currentPattern)
+                piano.trackIndex = p.selectedTrack
+                piano.invalidate()
+            }
+            3 -> {
+                playlist.project = p
+                playlist.selectedTrack = p.selectedTrack
+                playlist.invalidate()
+            }
+            4 -> {
+                mixer.project = p
+                mixer.selectedTrack = p.selectedTrack
+                mixer.invalidate()
+            }
+            5 -> auto.invalidate()
+        }
     }
 
     private fun refreshKeyboardForTrack() {
@@ -779,11 +895,131 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------------------------------------------------------------- 伴奏音频轨
+
+    /**
+     * 选择本地音频作为伴奏。
+     * 用系统文件选择器，不申请存储权限 —— SAF 拿到的是可读 URI，
+     * 复制进应用私有目录后就不再依赖外部权限。
+     */
+    private fun pickBackingAudio() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            type = "audio/*"
+        }
+        runCatching { startActivityForResult(intent, REQ_PICK_AUDIO) }
+            .onFailure { toast("这台设备没有可用的文件选择器") }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PICK_AUDIO || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        toast("正在读取音频…")
+        Thread {
+            val tmp = java.io.File(cacheDir, "backing-import.wav")
+            val ok = runCatching {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    tmp.outputStream().use { out -> input.copyTo(out) }
+                } != null
+            }.getOrDefault(false)
+            if (!ok) {
+                runOnUiThread { toast("读不到这个文件") }
+                return@Thread
+            }
+            session.backing.import(tmp) { success, message ->
+                runOnUiThread {
+                    toast(if (success) "伴奏已载入：$message" else message)
+                    if (success) transportBar.invalidate()
+                }
+            }
+        }.start()
+    }
+
+    /** 伴奏的音量、静音与起始位置。 */
+    private fun showBackingSettings() {
+        val wrap = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(4))
+        }
+        val info = TextView(this).apply {
+            text = if (session.backing.loaded)
+                "已载入：${session.backing.fileName}\n" +
+                "${"%.1f".format(session.backing.frames.toDouble() / session.backing.sampleRate)} 秒 · " +
+                "${session.backing.sampleRate} Hz"
+            else "还没有伴奏。先选「导入伴奏音频」。"
+            setTextColor(Palette.TEXT_DIM)
+            textSize = 12f
+        }
+        wrap.addView(info)
+
+        val gainLabel = TextView(this).apply {
+            text = "伴奏音量 ${(session.backing.gain * 100).toInt()}%"
+            setTextColor(Palette.TEXT)
+            textSize = 12f
+            setPadding(0, dp(12), 0, 0)
+        }
+        wrap.addView(gainLabel)
+        val gain = android.widget.SeekBar(this).apply {
+            max = 150
+            progress = (session.backing.gain * 100).toInt()
+        }
+        gain.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                session.backing.setGain(value / 100f)
+                gainLabel.text = "伴奏音量 ${value}%"
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+        })
+        wrap.addView(gain)
+
+        val mute = android.widget.CheckBox(this).apply {
+            text = "静音伴奏"
+            isChecked = session.backing.muted
+            setTextColor(Palette.TEXT_DIM)
+            setOnCheckedChangeListener { _, checked -> session.backing.setMuted(checked) }
+        }
+        wrap.addView(mute)
+
+        val controls = arrayOf("从当前播放位置对齐", "从头对齐（第 1 小节）", "移除伴奏")
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("伴奏")
+            .setView(wrap)
+            .setPositiveButton("关闭", null)
+            .setNeutralButton("对齐 / 移除…") { _, _ ->
+                android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("伴奏位置")
+                    .setItems(controls) { _, which ->
+                        when (which) {
+                            0 -> {
+                                session.backing.setStartTick(session.positionTicks())
+                                toast("伴奏已对齐到当前位置")
+                            }
+                            1 -> {
+                                session.backing.setStartTick(0)
+                                toast("伴奏已对齐到开头")
+                            }
+                            2 -> {
+                                session.backing.clear()
+                                toast("已移除伴奏")
+                            }
+                        }
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+            .show()
+    }
+
     private fun showMoreDialog() {
         val items = arrayOf(
             "保存工程",
             "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
             "摇摆 / Swing",
+            "导入伴奏音频…",
+            "伴奏设置…",
             "按曲风起步…",
             "DJ 与混音知识",
             "操作指南",
@@ -796,10 +1032,12 @@ class MainActivity : Activity() {
                     0 -> transportBar.onSave?.invoke()
                     1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
                     2 -> showSwingDialog()
-                    3 -> showGenrePicker()
-                    4 -> showDjKnowledge()
-                    5 -> showGestureGuide()
-                    6 -> {
+                    3 -> pickBackingAudio()
+                    4 -> showBackingSettings()
+                    5 -> showGenrePicker()
+                    6 -> showDjKnowledge()
+                    7 -> showGestureGuide()
+                    8 -> {
                         val ok = session.undoExternalEdit()
                         toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
                         refreshAll(session.project)
@@ -879,7 +1117,7 @@ class MainActivity : Activity() {
         // 诊断条是覆盖层：贴在页签下方显示，不参与纵向高度分配，
         // 也就不会再出现"改一处高度、另一处被裁掉"的连锁问题。
         (banner.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            lp.topMargin = insetTop + (tabBarView?.height ?: dp(46))
+            lp.topMargin = insetTop + (navBar?.height ?: dp(46))
             banner.layoutParams = lp
         }
     }

@@ -14,30 +14,48 @@ import kotlin.math.min
 
 /** 统一视觉系统：低亮石墨底、暖琥珀主色、青色仅用于时间与状态。 */
 object Palette {
-    const val BG = 0xFF0B0D12.toInt()
-    const val SURFACE = 0xFF0F131B.toInt()
-    const val PANEL = 0xFF151A24.toInt()
-    const val PANEL_HI = 0xFF1F2634.toInt()
-    /** 卡片顶面：比 PANEL 略亮，用于浮起元素。 */
-    const val CARD = 0xFF1A2029.toInt()
-    const val LINE = 0xFF303746.toInt()
-    const val LINE_SOFT = 0xFF222936.toInt()
-    const val ACCENT = 0xFFFFAD42.toInt()
-    const val ACCENT_DIM = 0xFF84501F.toInt()
-    const val CYAN = 0xFF54D6E8.toInt()
-    const val GREEN = 0xFF52D99A.toInt()
-    const val RED = 0xFFFF6B6B.toInt()
-    const val YELLOW = 0xFFF9D65C.toInt()
-    const val PURPLE = 0xFFB69CFF.toInt()
-    const val TEXT = 0xFFF3F5FA.toInt()
-    const val TEXT_DIM = 0xFFABB4C4.toInt()
-    const val TEXT_FAINT = 0xFF788398.toInt()
+    // 低饱和冷灰底：避免纯黑+高饱和造成的"廉价霓虹感"。
+    // 层次靠明度差建立，颜色只做点缀。
+    const val BG = 0xFF0A0C10.toInt()
+    const val SURFACE = 0xFF0E1117.toInt()
+    const val PANEL = 0xFF12161D.toInt()
+    const val PANEL_HI = 0xFF1A1F28.toInt()
+    const val CARD = 0xFF161B23.toInt()
+    const val LINE = 0xFF262C36.toInt()
+    const val LINE_SOFT = 0xFF1B2029.toInt()
 
-    // 每条轨道分配一个可辨识的颜色，混音台和播放列表都用它
+    // 主强调色：暖沙金，比原来的高饱和橙更克制。
+    const val ACCENT = 0xFFC9A227.toInt()
+    const val ACCENT_DIM = 0xFF6B5715.toInt()
+    // 时间/状态用雾蓝，不再用荧光青。
+    const val CYAN = 0xFF6FA8B8.toInt()
+    const val GREEN = 0xFF6FA37A.toInt()
+    const val RED = 0xFFC2564B.toInt()
+    const val YELLOW = 0xFFC9A227.toInt()
+    const val PURPLE = 0xFF8C86B8.toInt()
+
+    const val TEXT = 0xFFE4E7EC.toInt()
+    const val TEXT_DIM = 0xFF9099A8.toInt()
+    const val TEXT_FAINT = 0xFF626B7A.toInt()
+
+    /**
+     * 轨道色：全部降饱和、统一明度区间。
+     * 之前 12 种高饱和色同时出现，画面像调色盘；
+     * 现在只在相邻轨道间保证可区分，整体服从同一套灰调。
+     */
     private val TRACK_COLORS = intArrayOf(
-        0xFFFFAD42.toInt(), 0xFF54D6E8.toInt(), 0xFFB69CFF.toInt(), 0xFF52D99A.toInt(),
-        0xFFFDE047.toInt(), 0xFFF0453F.toInt(), 0xFF22D3EE.toInt(), 0xFFFB7185.toInt(),
-        0xFF818CF8.toInt(), 0xFF34D399.toInt(), 0xFFFBBF24.toInt(), 0xFFE879F9.toInt()
+        0xFFC9A227.toInt(), // 沙金
+        0xFF6FA8B8.toInt(), // 雾蓝
+        0xFF8C86B8.toInt(), // 灰紫
+        0xFF6FA37A.toInt(), // 苔绿
+        0xFFC08552.toInt(), // 陶土
+        0xFFC2564B.toInt(), // 砖红
+        0xFF7E8CA0.toInt(), // 石板
+        0xFFB58BA0.toInt(), // 藕荷
+        0xFF8A9A6B.toInt(), // 橄榄
+        0xFF9A8C7A.toInt(), // 卡其
+        0xFFA87F72.toInt(), // 红棕
+        0xFF7D93A8.toInt()  // 钢蓝
     )
 
     fun trackColor(index: Int): Int = TRACK_COLORS[((index % TRACK_COLORS.size) + TRACK_COLORS.size) % TRACK_COLORS.size]

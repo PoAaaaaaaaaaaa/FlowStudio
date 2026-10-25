@@ -390,6 +390,39 @@ Java_com_volt_flowstudio_audio_NativeEngine_nativeClearSample(JNIEnv*, jobject, 
     if (e) e->clearSample();
 }
 
+// ---------------------------------------------------------------- 伴奏音频轨
+
+JNIEXPORT void JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeSetBackingTrack(
+        JNIEnv* env, jobject, jlong handle, jfloatArray data, jint frames,
+        jint sampleRate, jdouble startTick, jfloat gain) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    if (!e || !data) return;
+    const jsize len = env->GetArrayLength(data);
+    if (len < 2 || frames <= 0) return;
+    // Kotlin 侧传的是交织立体声，长度应为 frames*2；不信任就按实际长度截断。
+    const int usableFrames = std::min<int>((int)(len / 2), frames);
+    std::vector<jfloat> buf((size_t)usableFrames * 2);
+    env->GetFloatArrayRegion(data, 0, (jsize)buf.size(), buf.data());
+    e->setBackingTrack(buf.data(), usableFrames, sampleRate, startTick, gain);
+    LOGI("backing track: %d frames @ %d Hz, start %.0f ticks", usableFrames, sampleRate, startTick);
+}
+
+JNIEXPORT void JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeClearBackingTrack(JNIEnv*, jobject, jlong handle) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    if (e) e->clearBackingTrack();
+}
+
+JNIEXPORT void JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeSetBackingGain(
+        JNIEnv*, jobject, jlong handle, jfloat gain, jboolean mute) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    if (!e) return;
+    e->setBackingTrackGain(gain);
+    e->setBackingTrackMute(mute);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_volt_flowstudio_audio_NativeEngine_nativeIsAudioRunning(JNIEnv*, jobject, jlong handle) {
     auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
@@ -420,3 +453,4 @@ Java_com_volt_flowstudio_audio_NativeEngine_nativeSampleRate(JNIEnv*, jobject, j
 }
 
 }  // extern "C"
+

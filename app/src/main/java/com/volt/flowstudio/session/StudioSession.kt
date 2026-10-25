@@ -28,6 +28,9 @@ class StudioSession(private val context: Context) {
 
     val engine = NativeEngine.instance
 
+    /** 伴奏音频轨：与编曲一起播放，不参与音符调度。 */
+    val backing: BackingTrack by lazy { BackingTrack(context.applicationContext) }
+
     /** 与外部工具（DSH 插件）通信的本地服务 */
     var bridge: StudioBridge? = null
         private set
@@ -290,6 +293,7 @@ class StudioSession(private val context: Context) {
                     pushAll()
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         .edit().putString(KEY_LAST, file.absolutePath).apply()
+                    backing.restore()
                     onLoaded?.invoke(proj)
                     onDone?.invoke(true)
                 }
