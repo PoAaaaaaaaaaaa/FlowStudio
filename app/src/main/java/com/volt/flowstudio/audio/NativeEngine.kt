@@ -149,15 +149,24 @@ class NativeEngine private constructor() {
 
     fun clearSample() = withHandle { nativeClearSample(it) }
 
-    // ---- 伴奏音频轨：交织立体声，按工程时间轴线性播放 ----
-    fun setBackingTrack(data: FloatArray, frames: Int, sampleRate: Int,
-                        startTick: Double, gain: Float) =
-        withHandle { nativeSetBackingTrack(it, data, frames, sampleRate, startTick, gain) }
+    // ---- 音频片段：素材进池子一次，之后只搬布局 ----
+    // 拖动片段不该把整首波形重新跨一次 JNI（三分钟约 30 MB float），
+    // 所以拆成两步：素材登记一次，布局每次只传六个数组。
+    fun setAudioBuffer(id: Int, data: FloatArray, frames: Int, sampleRate: Int) =
+        withHandle { nativeSetAudioBuffer(it, id, data, frames, sampleRate) }
 
-    fun clearBackingTrack() = withHandle { nativeClearBackingTrack(it) }
+    fun clearAudioBuffers() = withHandle { nativeClearAudioBuffers(it) }
 
-    fun setBackingGain(gain: Float, mute: Boolean) =
-        withHandle { nativeSetBackingGain(it, gain, mute) }
+    fun setAudioClips(
+        ids: IntArray, tracks: IntArray, starts: DoubleArray,
+        offsets: LongArray, lengths: LongArray, gains: FloatArray
+    ) = withHandle {
+        nativeSetAudioClips(it, ids, tracks, starts, offsets, lengths, gains)
+    }
+
+    fun clearAudioClips() = withHandle { nativeClearAudioClips(it) }
+
+    fun audioClipCount(): Int = if (handle != 0L) nativeAudioClipCount(handle) else 0
 
     // ---------------- JNI ----------------
     private external fun nativeCreate(unused: Int): Long
@@ -195,10 +204,14 @@ class NativeEngine private constructor() {
     private external fun nativeSetAutomation(handle: Long, meta: IntArray, ticks: IntArray, values: FloatArray)
     private external fun nativeRenderOffline(handle: Long, startTick: Double, endTick: Double, sampleRate: Int): FloatArray?
     private external fun nativeLoadSample(handle: Long, data: FloatArray, sampleRate: Int, rootNote: Int)
-    private external fun nativeSetBackingTrack(handle: Long, data: FloatArray, frames: Int,
-                                               sampleRate: Int, startTick: Double, gain: Float)
-    private external fun nativeClearBackingTrack(handle: Long)
-    private external fun nativeSetBackingGain(handle: Long, gain: Float, mute: Boolean)
+    private external fun nativeSetAudioBuffer(handle: Long, id: Int, data: FloatArray,
+                                              frames: Int, sampleRate: Int)
+    private external fun nativeClearAudioBuffers(handle: Long)
+    private external fun nativeSetAudioClips(handle: Long, ids: IntArray, tracks: IntArray,
+                                             starts: DoubleArray, offsets: LongArray,
+                                             lengths: LongArray, gains: FloatArray)
+    private external fun nativeClearAudioClips(handle: Long)
+    private external fun nativeAudioClipCount(handle: Long): Int
     private external fun nativeClearSample(handle: Long)
 }
 

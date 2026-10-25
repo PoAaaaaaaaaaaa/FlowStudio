@@ -12,53 +12,80 @@ import android.view.View
 import kotlin.math.max
 import kotlin.math.min
 
-/** 统一视觉系统：低亮石墨底、暖琥珀主色、青色仅用于时间与状态。 */
+/**
+ * 统一视觉系统。
+ *
+ * 参考 FL Studio Mobile 的工作区：深灰底、极低对比的分隔、
+ * 内容本身（波形、片段、电平）负责提供色彩，界面框架尽量隐形。
+ *
+ * 三条原则：
+ *   1. 层次用明度差建立，不靠描边。整屏只有一个真正的高光：正在播放的那条。
+ *   2. 强调色只出现在"当前状态"上（选中轨、播放头、正在编辑的片段），
+ *      不做装饰性用色。
+ *   3. 音频片段用一种固定蓝，音符片段用轨道色 —— 一眼分得清哪块是录音。
+ */
 object Palette {
-    // 低饱和冷灰底：避免纯黑+高饱和造成的"廉价霓虹感"。
-    // 层次靠明度差建立，颜色只做点缀。
-    const val BG = 0xFF0A0C10.toInt()
-    const val SURFACE = 0xFF0E1117.toInt()
-    const val PANEL = 0xFF12161D.toInt()
-    const val PANEL_HI = 0xFF1A1F28.toInt()
-    const val CARD = 0xFF161B23.toInt()
-    const val LINE = 0xFF262C36.toInt()
-    const val LINE_SOFT = 0xFF1B2029.toInt()
+    // 背景层：从最深的画布到最亮的面板，四档就够，再多就分不清了。
+    const val BG = 0xFF0D0F13.toInt()          // 画布
+    const val SURFACE = 0xFF14171C.toInt()     // 顶栏/底栏
+    const val PANEL = 0xFF1A1E25.toInt()       // 面板
+    const val PANEL_HI = 0xFF232831.toInt()    // 悬停/内嵌控件
+    const val CARD = 0xFF1E232B.toInt()        // 卡片
 
-    // 主强调色：暖沙金，比原来的高饱和橙更克制。
-    const val ACCENT = 0xFFC9A227.toInt()
-    const val ACCENT_DIM = 0xFF6B5715.toInt()
-    // 时间/状态用雾蓝，不再用荧光青。
-    const val CYAN = 0xFF6FA8B8.toInt()
+    // 分隔线：极细，只用来分区，不抢注意力。
+    const val LINE = 0xFF2C333E.toInt()
+    const val LINE_SOFT = 0xFF1F242B.toInt()
+
+    /**
+     * 主强调色。偏冷的浅青，用于选中与播放状态。
+     * 不用饱和橙/红：那些在暗底上视觉重量太大，看久了眼睛累。
+     */
+    const val ACCENT = 0xFF5BA8C4.toInt()
+    const val ACCENT_DIM = 0xFF2C5566.toInt()
+
+    // 语义色
+    const val CYAN = 0xFF5BA8C4.toInt()
     const val GREEN = 0xFF6FA37A.toInt()
     const val RED = 0xFFC2564B.toInt()
     const val YELLOW = 0xFFC9A227.toInt()
     const val PURPLE = 0xFF8C86B8.toInt()
 
-    const val TEXT = 0xFFE4E7EC.toInt()
-    const val TEXT_DIM = 0xFF9099A8.toInt()
-    const val TEXT_FAINT = 0xFF626B7A.toInt()
+    /**
+     * 音频片段专用色。与轨道色分开是有意的：
+     * 音符片段按轨道着色，音频片段统一一个颜色 —— 扫一眼就知道
+     * "这几块是成品/录音，那几块是编曲"。FL 里音频片段也是独立配色。
+     */
+    const val AUDIO = 0xFF3D8FB5.toInt()
+
+    // 文字三档：主、次、弱。不允许出现第四档灰。
+    const val TEXT = 0xFFE6EAF0.toInt()
+    const val TEXT_DIM = 0xFF98A2B0.toInt()
+    const val TEXT_FAINT = 0xFF646E7C.toInt()
 
     /**
-     * 轨道色：全部降饱和、统一明度区间。
-     * 之前 12 种高饱和色同时出现，画面像调色盘；
-     * 现在只在相邻轨道间保证可区分，整体服从同一套灰调。
+     * 轨道色：统一明度、统一饱和度区间，只在色相上区分。
+     *
+     * 之前 12 种高饱和色同时出现，画面像调色盘；现在的做法是
+     * 全部压到同一亮度带（约 55-65%），相邻轨道色相拉开。
+     * 这样八条轨道并排时是一组"同一个色系里的不同颜色"，而不是霓虹灯。
      */
     private val TRACK_COLORS = intArrayOf(
+        0xFF5BA8C4.toInt(), // 青
+        0xFF7C9EC9.toInt(), // 蓝
+        0xFF8C86B8.toInt(), // 紫
+        0xFFB07CA0.toInt(), // 品
+        0xFFC08552.toInt(), // 陶
         0xFFC9A227.toInt(), // 沙金
-        0xFF6FA8B8.toInt(), // 雾蓝
-        0xFF8C86B8.toInt(), // 灰紫
-        0xFF6FA37A.toInt(), // 苔绿
-        0xFFC08552.toInt(), // 陶土
-        0xFFC2564B.toInt(), // 砖红
-        0xFF7E8CA0.toInt(), // 石板
-        0xFFB58BA0.toInt(), // 藕荷
         0xFF8A9A6B.toInt(), // 橄榄
+        0xFF6FA37A.toInt(), // 苔绿
+        0xFF4FA3A0.toInt(), // 蓝绿
         0xFF9A8C7A.toInt(), // 卡其
         0xFFA87F72.toInt(), // 红棕
         0xFF7D93A8.toInt()  // 钢蓝
     )
 
-    fun trackColor(index: Int): Int = TRACK_COLORS[((index % TRACK_COLORS.size) + TRACK_COLORS.size) % TRACK_COLORS.size]
+    fun trackColor(index: Int): Int =
+        TRACK_COLORS[((index % TRACK_COLORS.size) + TRACK_COLORS.size) % TRACK_COLORS.size]
 
     fun withAlpha(color: Int, alpha: Int): Int =
         (color and 0x00FFFFFF) or ((alpha.coerceIn(0, 255)) shl 24)

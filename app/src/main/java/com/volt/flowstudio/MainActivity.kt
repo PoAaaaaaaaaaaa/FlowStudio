@@ -208,14 +208,15 @@ class MainActivity : Activity() {
         val menu = android.widget.FrameLayout(this)
         navMenuButton = FlowButton(this).apply {
             text = "☰"
-            textSize = 15f
-            buttonColor = Palette.PANEL_HI
-            foregroundColor = Palette.TEXT
+            textSize = 16f
+            // 无底色：整屏只保留内容区的色块，chrome 不参与配色竞争。
+            buttonColor = android.graphics.Color.TRANSPARENT
+            foregroundColor = Palette.TEXT_DIM
             setPadding(0, 0, 0, 0)
-            minWidth = dp(34)
-            minHeight = dp(34)
-            minimumWidth = dp(34)
-            minimumHeight = dp(34)
+            minWidth = dp(36)
+            minHeight = dp(36)
+            minimumWidth = dp(36)
+            minimumHeight = dp(36)
             setOnClickListener { openNavSheet() }
         }
         menu.addView(navMenuButton, android.widget.FrameLayout.LayoutParams(dp(34), dp(34)))
@@ -249,8 +250,7 @@ class MainActivity : Activity() {
             text = "1 / ${tabTitles.size}"
             setTextColor(Palette.TEXT_FAINT)
             textSize = 9f
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-            setBackgroundColor(Palette.PANEL)
+            setPadding(dp(8), dp(3), dp(10), dp(3))
         }
         bar.addView(navProgress, android.widget.LinearLayout.LayoutParams(
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -411,9 +411,7 @@ class MainActivity : Activity() {
                 transportBar.onLoopToggle?.invoke()
                 configurePlaylistTools(toolbar)
             },
-            (if (session.backing.loaded) "伴奏" else "加伴奏") to {
-                if (session.backing.loaded) showBackingSettings() else pickBackingAudio()
-            },
+            "导入音频" to { pickAudio() },
             "定位" to { session.seek(0); refreshPlayhead(); toast("已回到开头") },
             "缩小" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(42).toFloat() else (playlist.pixelsPerBar / 1.35f).coerceAtLeast(dp(28).toFloat()); playlist.invalidate() },
             "放大" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(120).toFloat() else (playlist.pixelsPerBar * 1.35f).coerceAtMost(dp(360).toFloat()); playlist.invalidate() }
@@ -550,14 +548,29 @@ class MainActivity : Activity() {
 
         // ---- 播放列表 ----
         playlist.onSeek = { tick -> session.seek(tick); refreshPlayhead() }
-        playlist.onClipsChanged = { session.pushBpm(); session.scheduleAutoSave() }
+        playlist.onClipsChanged = {
+            // 音频片段的布局也在片段表里，拖动/裁剪完必须重推引擎，
+            // 否则画面动了、声音还在老位置。
+            session.pushBpm()
+            session.pushAudioClips()
+            session.scheduleAutoSave()
+        }
         playlist.onSelectTrack = { idx -> session.project.selectedTrack = idx }
         playlist.onLoopChanged = { on, s, e ->
             session.setLoop(on, s, e)
             transportBar.setLoop(on)
         }
-        playlist.onBackingTap = {
-            if (session.backing.loaded) showBackingSettings() else pickBackingAudio()
+        playlist.onAudioTap = { clip -> showClipMenu(clip) }
+        // 空点一条空轨道：直接进导入，省掉「先去菜单找导入」这一步。
+        playlist.onEmptyTap = { track, tick ->
+            val empty = session.project.clips.none {
+                it.track == track && tick >= it.start && tick < it.end
+            }
+            if (empty) {
+                session.project.selectedTrack = track
+                session.seek(tick)
+                pickAudio()
+            }
         }
 
         // ---- 混音台 ----
@@ -571,9 +584,8 @@ class MainActivity : Activity() {
         // 自动保存保持安静，只有手动保存显示结果。
         session.onSaved = { ok -> if (!ok) toast("自动保存失败，请立即手动保存") }
         session.onLoaded = { p -> refreshAll(p) }
-        session.onBackingChanged = {
-            bindPlaylistBacking()
-            playlist.invalidate()
+        session.onAudioChanged = {
+            refreshAll(session.project)
             transportBar.invalidate()
         }
         // AI/插件写入后立刻刷新当前页面，并在底部显示可撤销提示。
@@ -632,7 +644,7 @@ class MainActivity : Activity() {
         playlist.loopStart = p.loopStart
         playlist.loopEnd = p.loopEnd
         playlist.selectedTrack = p.selectedTrack
-        bindPlaylistBacking()
+        bindPlaylistAudio()
         playlist.invalidate()
         mixer.project = p
         mixer.selectedTrack = p.selectedTrack
@@ -686,13 +698,13 @@ class MainActivity : Activity() {
     /** 从左侧打开工作区抽屉，位置与尺寸稳定，不做无关弹跳。 */
     private fun openNavSheet() {
         if (navSheet?.isShowing == true) return
-        val entries = tabTitles + listOf("导入伴奏…", "操作指南")
-        val hints = tabHints + listOf("音频与编曲一起播", "手势与工作区说明")
+        val entries = tabTitles + listOf("导入音频…", "操作指南")
+        val hints = tabHints + listOf("音频铺到时间线上", "手势与工作区说明")
         val panel = NavPanelView(this, entries, hints, currentTab, tabTitles.size) { idx ->
             navSheet?.dismiss()
             when {
                 idx < tabTitles.size -> showTab(idx)
-                idx == tabTitles.size -> pickBackingAudio()
+                idx == tabTitles.size -> pickAudio()
                 else -> showGestureGuide()
             }
         }
@@ -723,7 +735,7 @@ class MainActivity : Activity() {
             0 -> {
                 playlist.project = p
                 playlist.selectedTrack = p.selectedTrack
-                bindPlaylistBacking()
+                bindPlaylistAudio()
                 playlist.invalidate()
             }
             1 -> {
@@ -745,22 +757,18 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 把伴奏快照换算成工程 tick 后交给编排视图，避免两边各算一套。 */
-    private fun bindPlaylistBacking() {
-        val b = session.backing
+    /**
+     * 把音频素材的波形与时长交给编排视图。
+     *
+     * 峰值在导入时就算好并缓存，这里只搬引用 —— 每次刷新重算波形会让
+     * 页面切回来时卡一下，而波形本身在素材不变时是常量。
+     */
+    private fun bindPlaylistAudio() {
         val p = session.project
-        if (!b.loaded) {
-            playlist.backingName = ""
-            playlist.backingPeaks = FloatArray(0)
-            playlist.backingStartTick = 0
-            playlist.backingLengthTicks = 0
-            return
-        }
-        playlist.backingName = b.fileName
-        playlist.backingPeaks = b.peaks
-        playlist.backingStartTick = b.startTick
-        val sec = b.frames.toDouble() / b.sampleRate.coerceAtLeast(1)
-        playlist.backingLengthTicks = (sec * p.bpm / 60.0 * 480.0).toInt().coerceAtLeast(480)
+        val peaks = HashMap<Int, FloatArray>(p.audioAssets.size)
+        for (a in p.audioAssets) peaks[a.id] = session.audioStore.peaksOf(a.id)
+        playlist.audioPeaks = peaks
+        playlist.invalidate()
     }
 
     private fun refreshKeyboardForTrack() {
@@ -786,6 +794,11 @@ class MainActivity : Activity() {
         when (currentTab) {
             0 -> {
                 playlist.playheadTick = pos
+                // trackLevels() 返回的是 peak*1000 的整数（见 jni_bridge 里的换算），
+                // 这里还原成 0..1 给电平表用。
+                val raw = session.engine.trackLevels()
+                val norm = FloatArray(raw.size) { (raw[it] / 1000f).coerceIn(0f, 1f) }
+                playlist.levels = norm
                 if (session.isPlaying()) playlist.scrollToPlayheadIfNeeded(pos)
             }
             1 -> {
@@ -896,17 +909,18 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------------------------------------------------------------- 伴奏音频轨
+    // ---------------------------------------------------------------- 音频片段
 
     /**
-     * 选择本地音频作为伴奏。
+     * 选择本地音频导入。
      * 用系统文件选择器，不申请存储权限 —— SAF 拿到的是可读 URI，
      * 复制进应用私有目录后就不再依赖外部权限。
      */
-    private fun pickBackingAudio() {
+    private fun pickAudio() {
         val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(android.content.Intent.CATEGORY_OPENABLE)
             type = "audio/*"
+            putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         runCatching { startActivityForResult(intent, REQ_PICK_AUDIO) }
             .onFailure { toast("这台设备没有可用的文件选择器") }
@@ -915,105 +929,129 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_PICK_AUDIO || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        toast("正在读取音频…")
+
+        // 支持一次选多个：编曲常常是一整套鼓组 + 人声 + 乐器分轨一起进来。
+        val uris = ArrayList<android.net.Uri>()
+        data?.clipData?.let { cd ->
+            for (i in 0 until cd.itemCount) cd.getItemAt(i)?.uri?.let { uris.add(it) }
+        }
+        if (uris.isEmpty()) data?.data?.let { uris.add(it) }
+        if (uris.isEmpty()) return
+
+        toast(if (uris.size == 1) "正在读取音频…" else "正在读取 ${uris.size} 个音频…")
         Thread {
-            val tmp = java.io.File(cacheDir, "backing-import.wav")
-            val ok = runCatching {
-                contentResolver.openInputStream(uri)?.use { input ->
-                    tmp.outputStream().use { out -> input.copyTo(out) }
-                } != null
-            }.getOrDefault(false)
-            if (!ok) {
-                runOnUiThread { toast("读不到这个文件") }
-                return@Thread
+            var okCount = 0
+            var lastMessage = ""
+            for (uri in uris) {
+                val name = queryDisplayName(uri) ?: "audio.wav"
+                val tmp = java.io.File(cacheDir, "import-${System.nanoTime()}.wav")
+                val copied = runCatching {
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        tmp.outputStream().use { out -> input.copyTo(out) }
+                    } != null
+                }.getOrDefault(false)
+                if (!copied) {
+                    lastMessage = "读不到 $name"
+                    continue
+                }
+                val latch = java.util.concurrent.CountDownLatch(1)
+                session.importAudio(tmp, name) { success, message ->
+                    if (success) okCount++ else lastMessage = message
+                    latch.countDown()
+                }
+                latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                tmp.delete()
             }
-            session.importBacking(tmp) { success, message ->
-                toast(if (success) "伴奏已载入：$message" else message)
-                if (success) {
-                    lightRefresh(currentTab)
+            val finalCount = okCount
+            val finalMsg = lastMessage
+            runOnUiThread {
+                when {
+                    finalCount > 0 && finalMsg.isBlank() -> toast("已导入 $finalCount 段音频")
+                    finalCount > 0 -> toast("已导入 $finalCount 段 · $finalMsg")
+                    else -> toast(finalMsg.ifBlank { "没能导入音频：只支持 PCM WAV" })
+                }
+                if (finalCount > 0) {
+                    refreshAll(session.project)
                     transportBar.invalidate()
                 }
             }
         }.start()
     }
 
-    /** 伴奏的音量、静音与起始位置。 */
-    private fun showBackingSettings() {
+    /** 从 content URI 取原始文件名 —— 片段标题就用它，FL 里也是这么显示的。 */
+    private fun queryDisplayName(uri: android.net.Uri): String? = runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        }
+    }.getOrNull()
+
+    /** 点一个音频片段：改增益、换轨道、定位、删除。 */
+    private fun showClipMenu(clip: com.volt.flowstudio.model.Clip) {
+        val asset = session.project.audioAssetById(clip.audioId)
+        val name = asset?.name ?: "音频片段"
         val wrap = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(dp(20), dp(14), dp(20), dp(4))
         }
-        val info = TextView(this).apply {
-            text = if (session.backing.loaded)
-                "已载入：${session.backing.fileName}\n" +
-                "${"%.1f".format(session.backing.frames.toDouble() / session.backing.sampleRate)} 秒 · " +
-                "${session.backing.sampleRate} Hz"
-            else "还没有伴奏。先选「导入伴奏音频」。"
+        wrap.addView(TextView(this).apply {
+            text = "$name\n${"%.1f".format(asset?.durationSec ?: 0f)} 秒 · " +
+                "${asset?.sampleRate ?: 0} Hz · 轨道 ${clip.track + 1}"
             setTextColor(Palette.TEXT_DIM)
             textSize = 12f
-        }
-        wrap.addView(info)
+        })
 
         val gainLabel = TextView(this).apply {
-            text = "伴奏音量 ${(session.backing.gain * 100).toInt()}%"
+            text = "片段增益 ${(clip.audioGain * 100).toInt()}%"
             setTextColor(Palette.TEXT)
             textSize = 12f
             setPadding(0, dp(12), 0, 0)
         }
         wrap.addView(gainLabel)
-        val gain = android.widget.SeekBar(this).apply {
-            max = 150
-            progress = (session.backing.gain * 100).toInt()
-        }
-        gain.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
-                if (!fromUser) return
-                session.backing.setGain(value / 100f, session.project)
-                session.scheduleAutoSave()
-                gainLabel.text = "伴奏音量 ${value}%"
-            }
-            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+        wrap.addView(android.widget.SeekBar(this).apply {
+            max = 200
+            progress = (clip.audioGain * 100).toInt()
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    clip.audioGain = value / 100f
+                    gainLabel.text = "片段增益 $value%"
+                    session.pushAudioClips()
+                    session.scheduleAutoSave()
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+            })
         })
-        wrap.addView(gain)
 
-        val mute = android.widget.CheckBox(this).apply {
-            text = "静音伴奏"
-            isChecked = session.backing.muted
-            setTextColor(Palette.TEXT_DIM)
-            setOnCheckedChangeListener { _, checked ->
-                session.backing.setMuted(checked, session.project)
-                session.scheduleAutoSave()
-            }
-        }
-        wrap.addView(mute)
-
-        val controls = arrayOf("从当前播放位置对齐", "从头对齐（第 1 小节）", "移除伴奏")
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("伴奏")
+            .setTitle("音频片段")
             .setView(wrap)
             .setPositiveButton("关闭", null)
-            .setNeutralButton("对齐 / 移除…") { _, _ ->
+            .setNeutralButton("操作…") { _, _ ->
+                val actions = arrayOf("移到当前选中轨道", "对齐到播放头", "整段铺满素材", "删除片段")
                 android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle("伴奏位置")
-                    .setItems(controls) { _, which ->
+                    .setTitle("片段操作")
+                    .setItems(actions) { _, which ->
                         when (which) {
                             0 -> {
-                                session.backing.setStartTick(session.positionTicks(), session.project)
-                                session.scheduleAutoSave()
-                                toast("伴奏已对齐到当前位置")
+                                clip.track = session.project.selectedTrack
+                                    .coerceIn(0, maxOf(0, session.project.tracks.size - 1))
+                                toast("已移到轨道 ${clip.track + 1}")
                             }
-                            1 -> {
-                                session.backing.setStartTick(0, session.project)
-                                session.scheduleAutoSave()
-                                toast("伴奏已对齐到开头")
+                            1 -> clip.start = session.positionTicks()
+                            2 -> asset?.let {
+                                clip.length = it.lengthTicks(session.project.bpm)
+                                clip.offset = 0
                             }
-                            2 -> {
-                                session.clearBacking()
-                                toast("已移除伴奏")
+                            3 -> {
+                                session.removeClip(clip.id)
+                                toast("已删除片段")
                             }
                         }
+                        session.pushAudioClips()
+                        session.scheduleAutoSave()
+                        playlist.invalidate()
                     }
                     .setNegativeButton("取消", null)
                     .show()
@@ -1026,8 +1064,7 @@ class MainActivity : Activity() {
             "保存工程",
             "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
             "摇摆 / Swing",
-            "导入伴奏音频…",
-            "伴奏设置…",
+            "导入音频…",
             "按曲风起步…",
             "DJ 与混音知识",
             "操作指南",
@@ -1040,12 +1077,11 @@ class MainActivity : Activity() {
                     0 -> transportBar.onSave?.invoke()
                     1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
                     2 -> showSwingDialog()
-                    3 -> pickBackingAudio()
-                    4 -> showBackingSettings()
-                    5 -> showGenrePicker()
-                    6 -> showDjKnowledge()
-                    7 -> showGestureGuide()
-                    8 -> {
+                    3 -> pickAudio()
+                    4 -> showGenrePicker()
+                    5 -> showDjKnowledge()
+                    6 -> showGestureGuide()
+                    7 -> {
                         val ok = session.undoExternalEdit()
                         toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
                         refreshAll(session.project)

@@ -3,17 +3,26 @@ package com.volt.flowstudio.ui
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Rect
 import android.util.AttributeSet
 import android.view.MotionEvent
+import com.volt.flowstudio.model.AudioAsset
 import com.volt.flowstudio.model.Clip
 import com.volt.flowstudio.model.Note
 import com.volt.flowstudio.model.Project
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * 播放列表：横向是时间，纵向是轨道，片段可以拖、拉长、拖复制。
- * 顶部标尺点一下可以定位播放头，拖可以划循环区间。
+ * 播放列表（时间线）。
+ *
+ * 两条轨道语义并存，但外观统一 —— 这是 FL 播放列表的核心观感：
+ *   - 音符片段：内容来自样式，画成能量包络；
+ *   - 音频片段：内容来自素材，画成真实波形，标题就是文件名。
+ *
+ * 左侧窄条是轨道头：轨道序号、名称、以及一条垂直电平表。
+ * 顶部是标尺，点一下定位、拖一下划循环。
  */
 class PlaylistView @JvmOverloads constructor(
     context: Context,
@@ -29,16 +38,15 @@ class PlaylistView @JvmOverloads constructor(
     var selectedTrack: Int = 0
         set(v) { field = v; invalidate() }
 
-    var pixelsPerBar: Float = 0f     // 0 = 自动铺满
+    /** 每小节像素宽；0 = 按内容自适应。 */
+    var pixelsPerBar: Float = 0f
 
-    /** 伴奏波形快照；由 MainActivity 在刷新时绑定。 */
-    var backingName: String = ""
-    var backingPeaks: FloatArray = FloatArray(0)
-    var backingStartTick: Int = 0
-    var backingLengthTicks: Int = 0
+    /** 素材 id → 波形峰值。由 MainActivity 在刷新时绑定。 */
+    var audioPeaks: Map<Int, FloatArray> = emptyMap()
 
-    /** 点击伴奏条：打开伴奏设置。 */
-    var onBackingTap: (() -> Unit)? = null
+    /** 各轨道实时电平 0..1，驱动左侧电平表。 */
+    var levels: FloatArray = FloatArray(0)
+        set(v) { field = v; invalidate() }
 
     var loopOn: Boolean = false
     var loopStart: Int = 0
@@ -48,38 +56,50 @@ class PlaylistView @JvmOverloads constructor(
     var onSeek: ((Int) -> Unit)? = null
     var onSelectTrack: ((Int) -> Unit)? = null
     var onClipTapped: ((Clip) -> Unit)? = null
+    var onAudioTap: ((Clip) -> Unit)? = null
     var onLoopChanged: ((Boolean, Int, Int) -> Unit)? = null
+    var onEmptyTap: ((Int, Int) -> Unit)? = null   // 轨道, tick —— 空态导入入口
 
     private var headerWidth = 0f
     private var rulerHeight = 0f
     private var rowHeight = 0f
     private var scrollX = 0f
     private var scrollY = 0f
+    private var contentH = 0f
 
-    private enum class Drag { NONE, MOVE, RESIZE_R, SEEK, LOOP, PAN }
+    private enum class Drag { NONE, MOVE, RESIZE_R, RESIZE_L, SEEK, LOOP, PAN }
     private var drag = Drag.NONE
     private var activeClip: Clip? = null
     private var dragStartX = 0f
-    private var dragStartY = 0f
     private var origStart = 0
     private var origLen = 0
-    private var origTrack = 0
-    private var lastClipTapTime = 0L
-    private var lastClipTapped: Clip? = null
+    private var origOffset = 0
     private var panX = 0f
     private var panY = 0f
     private var loopAnchor = 0
+
+    private val scanCache = HashMap<Int, FloatArray>()
+    private var scanCacheKey = 0
+
+    // ---------------------------------------------------------------- 几何
 
     private fun barWidth(): Float {
         if (pixelsPerBar > 0f) return pixelsPerBar
         val p = project ?: return dp(120f)
         val bars = p.lengthBars().coerceAtLeast(8)
-        val usable = width - headerWidth - dp(8f)
-        return max(dp(56f), usable / bars.coerceAtMost(16).toFloat())
+        val usable = width - headerWidth
+        return max(dp(52f), usable / min(bars, 12).toFloat())
     }
 
     private fun tickToX(t: Int): Float = headerWidth + (t * barWidth() / Note.BAR) - scrollX
     private fun xToTick(x: Float): Int = (((x - headerWidth + scrollX) / barWidth()) * Note.BAR).toInt()
+
+    private fun rowTop(track: Int): Float = rulerHeight + track * rowHeight - scrollY
+
+    private fun snapTick(t: Int): Int =
+        Math.round(t.toFloat() / Note.STEP) * Note.STEP
+
+    // ---------------------------------------------------------------- 绘制
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
@@ -87,179 +107,318 @@ class PlaylistView @JvmOverloads constructor(
         canvas.drawColor(Palette.BG)
 
         val p = project ?: return
-        headerWidth = dp(64f)
-        rulerHeight = dp(26f)
-        val tracks = p.tracks.size.coerceAtLeast(1)
-        rowHeight = ((h - rulerHeight) / min(tracks, 8).coerceAtLeast(1)).coerceAtLeast(dp(26f))
+        headerWidth = dp(if (w < dp(520f)) 54f else 68f)
+        rulerHeight = dp(24f)
+        val trackCount = p.tracks.size.coerceAtLeast(1)
+        rowHeight = ((h - rulerHeight) / min(trackCount, 6).coerceAtLeast(1))
+            .coerceIn(dp(34f), dp(72f))
+        contentH = rulerHeight + trackCount * rowHeight
+        scrollY = scrollY.coerceIn(0f, max(0f, contentH - h))
 
         val bw = barWidth()
 
-        // ---- 轨道行背景 ----
-        for (i in 0 until tracks) {
-            val top = rulerHeight + i * rowHeight - scrollY
-            if (top > h || top + rowHeight < rulerHeight) continue
-            val color = Palette.trackColor(i)
-            if (i == selectedTrack) {
-                rect(canvas, 0f, top, w, top + rowHeight, Palette.withAlpha(color, 22))
-            } else if (i % 2 == 0) {
-                rect(canvas, 0f, top, w, top + rowHeight, Palette.withAlpha(Palette.PANEL, 90))
-            }
-            line(canvas, 0f, top + rowHeight, w, top + rowHeight, Palette.LINE_SOFT, dp(1f))
+        drawRows(canvas, p, w, h)
+        drawGrid(canvas, p, w, h, bw)
+        drawRuler(canvas, w, bw)
+        drawClips(canvas, p, w, h)
+        drawPlayhead(canvas, w, h)
+    }
 
-            // 轨道头
-            rect(canvas, 0f, top, headerWidth, top + rowHeight, Palette.PANEL)
-            val name = p.trackAt(i)?.name ?: "轨 ${i + 1}"
-            label(
-                canvas, clipText(name, headerWidth - dp(10f), sp(9.5f)),
-                dp(4f), top + rowHeight * 0.62f, color, sp(9.5f), bold = i == selectedTrack
-            )
-            line(canvas, headerWidth, top, headerWidth, top + rowHeight, Palette.LINE, dp(1f))
+    /** 轨道底纹与轨道头。 */
+    private fun drawRows(canvas: Canvas, p: Project, w: Float, h: Float) {
+        val trackCount = p.tracks.size.coerceAtLeast(1)
+        for (i in 0 until trackCount) {
+            val top = rowTop(i)
+            if (top > h || top + rowHeight < rulerHeight) continue
+            val bottom = top + rowHeight
+
+            // 选中轨稍微提亮；其余靠极细的分隔线分层，不做斑马纹。
+            if (i == selectedTrack) {
+                rect(canvas, 0f, top, w, bottom, Palette.withAlpha(Palette.ACCENT, 10))
+            }
+            rect(canvas, 0f, top, headerWidth, bottom, Palette.SURFACE)
+
+            drawTrackHead(canvas, p, i, top, bottom)
+            line(canvas, 0f, bottom, w, bottom, Palette.LINE_SOFT, dp(1f))
+            line(canvas, headerWidth, top, headerWidth, bottom, Palette.LINE, dp(1f))
+        }
+    }
+
+    /** 轨道头：序号、名称、垂直电平表。 */
+    private fun drawTrackHead(canvas: Canvas, p: Project, i: Int, top: Float, bottom: Float) {
+        val hh = bottom - top
+        val color = Palette.trackColor(i)
+        val selected = i == selectedTrack
+
+        // 左侧强调条：选中时是实色，未选中是暗色。
+        rect(canvas, 0f, top + dp(3f), dp(2.5f), bottom - dp(3f),
+            if (selected) color else Palette.withAlpha(color, 70), dp(1f))
+
+        val midY = top + hh / 2f
+        // 序号贴底，名称居中；行高够时才画序号，避免小行挤成一团。
+        if (hh >= dp(46f)) {
+            label(canvas, "${i + 1}", dp(8f), top + dp(13f),
+                Palette.TEXT_FAINT, sp(8f), bold = true)
+            label(canvas,
+                clipText(p.trackAt(i)?.name ?: "轨 ${i + 1}", headerWidth - dp(24f), sp(9.5f), selected),
+                dp(8f), midY + dp(6f),
+                if (selected) Palette.TEXT else Palette.withAlpha(color, 220), sp(9.5f), bold = selected)
+        } else {
+            label(canvas,
+                clipText(p.trackAt(i)?.name ?: "轨 ${i + 1}", headerWidth - dp(24f), sp(9f), selected),
+                dp(8f), midY + dp(4f),
+                if (selected) Palette.TEXT else Palette.withAlpha(color, 220), sp(9f), bold = selected)
         }
 
-        // ---- 竖向时间线 ----
-        val barsVisible = ((w - headerWidth + scrollX) / bw).toInt() + 2
+        // 垂直电平表：贴着右缘，一段一段亮起来，像硬件推子旁的 LED 柱。
+        val meterX = headerWidth - dp(9f)
+        val meterTop = top + dp(8f)
+        val meterBottom = bottom - dp(8f)
+        val meterH = meterBottom - meterTop
+        if (meterH > dp(10f)) {
+            val lv = levels.getOrElse(i) { 0f }.coerceIn(0f, 1f)
+            val segs = max(2, (meterH / dp(6f)).toInt())
+            for (s in 0 until segs) {
+                val segBottom = meterBottom - s * (meterH / segs)
+                val segTop = segBottom - (meterH / segs) * 0.7f
+                val lit = (s.toFloat() / segs) < lv
+                val c = when {
+                    !lit -> Palette.withAlpha(color, 34)
+                    s >= segs - 2 -> Palette.RED
+                    s >= segs - 4 -> Palette.ACCENT
+                    else -> Palette.withAlpha(color, 230)
+                }
+                rect(canvas, meterX, segTop, meterX + dp(3f), segBottom, c, dp(0.8f))
+            }
+        }
+    }
+
+    /** 拍与小节网格。小节线实、拍线虚。 */
+    private fun drawGrid(canvas: Canvas, p: Project, w: Float, h: Float, bw: Float) {
         val firstBar = (scrollX / bw).toInt()
-        for (b in firstBar..firstBar + barsVisible) {
+        val visible = ((w - headerWidth + scrollX) / bw).toInt() + 2
+        for (b in firstBar..firstBar + visible) {
             val x = headerWidth + b * bw - scrollX
             if (x < headerWidth - 1 || x > w) continue
-            line(canvas, x, rulerHeight, x, h, Palette.withAlpha(Palette.LINE, 150), dp(1f))
-            // 四分格弱线
-            for (q in 1 until 4) {
-                val qx = x + q * bw / 4f
-                if (qx in headerWidth..w) {
-                    line(canvas, qx, rulerHeight, qx, h, Palette.withAlpha(Palette.LINE_SOFT, 110), dp(0.8f))
+            line(canvas, x, rulerHeight, x, h, Palette.withAlpha(Palette.LINE, 130), dp(1f))
+            // 拍线只在放大后画，否则小节很窄时会糊成一片灰。
+            val beats = p.beatsPerBar.coerceIn(1, 16)
+            if (bw / beats >= dp(9f)) {
+                for (q in 1 until beats) {
+                    val qx = x + q * bw / beats
+                    if (qx in headerWidth..w) {
+                        line(canvas, qx, rulerHeight, qx, h,
+                            Palette.withAlpha(Palette.LINE_SOFT, 90), dp(0.8f))
+                    }
                 }
             }
         }
+    }
 
-        // ---- 标尺 ----
+    /** 顶部标尺：数字跳过密排，只有能放下时才标。 */
+    private fun drawRuler(canvas: Canvas, w: Float, bw: Float) {
         rect(canvas, 0f, 0f, w, rulerHeight, Palette.PANEL)
-        for (b in firstBar..firstBar + barsVisible) {
+        rect(canvas, 0f, 0f, headerWidth, rulerHeight, Palette.SURFACE)
+        line(canvas, 0f, rulerHeight, w, rulerHeight, Palette.LINE, dp(1f))
+
+        val firstBar = (scrollX / bw).toInt()
+        val visible = ((w - headerWidth + scrollX) / bw).toInt() + 2
+        // 小节太密时隔几个标一个，保证数字不重叠。
+        val stride = max(1, kotlin.math.ceil((dp(26f) / bw).toDouble()).toInt())
+        for (b in firstBar..firstBar + visible) {
             val x = headerWidth + b * bw - scrollX
             if (x < headerWidth - 1 || x > w) continue
-            label(canvas, "${b + 1}", x + dp(3f), rulerHeight - dp(5f), Palette.TEXT_DIM, sp(8.5f), bold = true)
-            line(canvas, x, rulerHeight - dp(4f), x, rulerHeight, Palette.LINE, dp(1f))
+            val showNumber = (b % stride) == 0
+            val tickH = if (showNumber) dp(7f) else dp(4f)
+            line(canvas, x, rulerHeight - tickH, x, rulerHeight,
+                if (showNumber) Palette.TEXT_DIM else Palette.LINE, dp(1f))
+            if (showNumber) {
+                label(canvas, "${b + 1}", x + dp(3f), rulerHeight - dp(9f),
+                    Palette.TEXT_DIM, sp(8.5f), bold = true)
+            }
         }
-
-        // ---- 循环区间 ----
         if (loopOn) {
-            val lx = tickToX(loopStart)
-            val rx = tickToX(loopEnd)
-            rect(
-                canvas, max(lx, headerWidth), 0f, min(rx, w), rulerHeight,
-                Palette.withAlpha(Palette.ACCENT, 70)
-            )
-            if (lx in headerWidth..w) line(canvas, lx, 0f, lx, h, Palette.withAlpha(Palette.ACCENT, 120), dp(1.5f))
-            if (rx in headerWidth..w) line(canvas, rx, 0f, rx, h, Palette.withAlpha(Palette.ACCENT, 120), dp(1.5f))
+            val lx = tickToX(loopStart).coerceIn(headerWidth, w)
+            val rx = tickToX(loopEnd).coerceIn(headerWidth, w)
+            if (rx > lx) {
+                rect(canvas, lx, 0f, rx, rulerHeight, Palette.withAlpha(Palette.ACCENT, 46))
+                line(canvas, lx, 0f, lx, rulerHeight, Palette.withAlpha(Palette.ACCENT, 170), dp(1.5f))
+                line(canvas, rx, 0f, rx, rulerHeight, Palette.withAlpha(Palette.ACCENT, 170), dp(1.5f))
+            }
         }
+    }
 
-        // ---- 片段 ----
+    /** 所有片段。音频与音符共用外框与把手，内容各自画。 */
+    private fun drawClips(canvas: Canvas, p: Project, w: Float, h: Float) {
+        val bw = barWidth()
+        if (bw != scanCacheKey.toFloat()) { scanCache.clear(); scanCacheKey = bw.toInt() }
+
         for (clip in p.clips) {
-            val top = rulerHeight + clip.track * rowHeight - scrollY
+            val top = rowTop(clip.track)
             if (top > h || top + rowHeight < rulerHeight) continue
             val x0 = tickToX(clip.start)
             val x1 = tickToX(clip.end)
             if (x1 < headerWidth || x0 > w) continue
 
-            val color = Palette.trackColor(clip.track)
             val l = max(x0, headerWidth)
             val r = min(x1, w)
-            val t = top + dp(2f)
-            val bt = top + rowHeight - dp(2f)
+            if (r - l < dp(1f)) continue
+            val t = top + dp(3f)
+            val bt = top + rowHeight - dp(3f)
+            val color = if (clip.isAudio) Palette.AUDIO else Palette.trackColor(clip.track)
 
-            // 片段本体：用 pattern 里的音符画一层迷你条，一眼看出内容
-            rect(canvas, l, t, r, bt, Palette.withAlpha(color, 62), dp(6f))
-            outline(canvas, l, t, r, bt, Palette.withAlpha(color, 200), dp(6f), dp(1.2f))
+            // 主体：低透明度填充 + 1px 描边，像 FL 那种"卡片块"。
+            rect(canvas, l, t, r, bt, Palette.withAlpha(color, if (clip.isAudio) 56 else 48), dp(4f))
+            outline(canvas, l, t, r, bt, Palette.withAlpha(color, 190), dp(4f), dp(1.1f))
 
-            // 片段内容：画成波形包络，而不是几条横线。
-            // FL 的片段一眼能看出"这段是密的还是疏的"，靠的就是这个。
-            // 我们按时间切片统计该片段的音符能量（数量 × 力度 × 时长），
-            // 归一后画成上下对称的包络。
-            val pat = p.patternById(clip.patternId)
-            if (pat != null) {
-                val notes = pat.notesOrNull(clip.track)
-                if (notes != null && notes.isNotEmpty()) {
-                    drawWaveform(canvas, clip, notes, l, r, t, bt, color)
+            // 顶部标题条：只有够宽才画，否则整块被标题吃掉。
+            val titleH = dp(11f)
+            val bodyTop = t + titleH + dp(1f)
+            if (r - l > dp(30f) && bt - t > dp(20f)) {
+                rect(canvas, l, t, r, t + titleH, Palette.withAlpha(color, 205), dp(4f))
+                val title = if (clip.isAudio) {
+                    p.audioAssetById(clip.audioId)?.name ?: "音频"
+                } else {
+                    clip.label.ifBlank { p.patternById(clip.patternId)?.name ?: "样式" }
+                }
+                label(canvas, clipText(title, r - l - dp(8f), sp(8f), true),
+                    l + dp(4f), t + dp(8.5f), Palette.BG, sp(8f), bold = true)
+            } else {
+                // 太窄就只在顶部一窄条里点个色，还能看出位置。
+                rect(canvas, l, t, r, t + dp(3f), Palette.withAlpha(color, 205), dp(1.5f))
+            }
+
+            if (bt - bodyTop > dp(4f)) {
+                if (clip.isAudio) {
+                    drawAudioWave(canvas, clip, l, r, bodyTop, bt)
+                } else {
+                    drawNoteEnvelope(canvas, p, clip, l, r, bodyTop, bt, color)
                 }
             }
 
-            // Pattern 名
-            if (r - l > dp(28f)) {
-                val title = pat?.name ?: "?"
-                rect(canvas, l, t, min(l + dp(52f), r), t + dp(11f), Palette.withAlpha(color, 210), dp(3f))
-                label(canvas, clipText(title, min(dp(50f), r - l), sp(8f)), l + dp(3f), t + dp(8.5f), Palette.BG, sp(8f), bold = true)
+            // 右缘把手：拖它改长度。
+            if (r - l > dp(18f)) {
+                rect(canvas, r - dp(3f), t + dp(2f), r - dp(0.5f), bt - dp(2f),
+                    Palette.withAlpha(color, 150), dp(1f))
             }
-
-            // 右边缘把手
-            rect(canvas, r - dp(3.5f), t + dp(2f), r, bt - dp(2f), Palette.withAlpha(Palette.BG, 120))
-        }
-
-        // 没有伴奏时给一个明确的入口条，而不是让用户猜去哪里导入。
-        if (backingLengthTicks <= 0) {
-            val promptTop = rulerHeight + tracks.coerceAtLeast(1) * rowHeight - scrollY + dp(2f)
-            val promptBottom = promptTop + dp(34f)
-            if (promptBottom > rulerHeight && promptTop < h) {
-                val left = headerWidth + dp(8f)
-                val right = min(w - dp(8f), left + dp(220f))
-                rect(canvas, left, promptTop, right, promptBottom,
-                    Palette.withAlpha(Palette.CYAN, 26), dp(6f))
-                outline(canvas, left, promptTop, right, promptBottom,
-                    Palette.withAlpha(Palette.CYAN, 120), dp(6f), dp(1f))
-                label(canvas, "+ 导入伴奏音频（WAV）", left + dp(10f),
-                    promptTop + dp(21f), Palette.CYAN, sp(9.5f), bold = true)
-            }
-        }
-
-        // ---- 伴奏音频轨 ----
-        // 音乐片段与真实音频叠在同一时间轴，才能看出"伴奏从哪里进"。
-        val backingTop = rulerHeight + tracks * rowHeight - scrollY
-        val backingH = if (backingLengthTicks > 0) dp(72f) else dp(40f)
-        val backingBottom = backingTop + backingH
-        if (backingBottom > rulerHeight && backingTop < h) {
-            rect(canvas, 0f, backingTop, w, backingBottom, Palette.withAlpha(Palette.CYAN, 14))
-            rect(canvas, 0f, backingTop, headerWidth, backingBottom, Palette.SURFACE)
-            val labelText = if (backingLengthTicks > 0) backingName.ifBlank { "伴奏" } else "伴奏 · 未导入"
-            label(canvas, clipText(labelText, headerWidth - dp(10f), sp(9f), true),
-                dp(5f), backingTop + dp(16f), Palette.CYAN, sp(9f), bold = true)
-            label(canvas, if (backingLengthTicks > 0) "音频轨" else "点 + 导入",
-                dp(5f), backingTop + dp(28f), Palette.TEXT_FAINT, sp(8f))
-            line(canvas, 0f, backingBottom, w, backingBottom, Palette.LINE_SOFT, dp(1f))
-
-            if (backingLengthTicks > 0) {
-                val x0 = max(tickToX(backingStartTick), headerWidth)
-                val x1 = min(tickToX(backingStartTick + backingLengthTicks), w)
-                if (x1 > x0) {
-                    val t = backingTop + dp(4f)
-                    val bt = backingBottom - dp(4f)
-                    rect(canvas, x0, t, x1, bt, Palette.withAlpha(Palette.CYAN, 30), dp(4f))
-                    outline(canvas, x0, t, x1, bt, Palette.withAlpha(Palette.CYAN, 130), dp(4f), dp(1f))
-                    if (backingPeaks.isNotEmpty()) {
-                        val mid = (t + bt) / 2f
-                        val half = (bt - t) / 2f * 0.86f
-                        val cols = (x1 - x0).toInt().coerceAtMost(1200)
-                        b.fill.style = Paint.Style.FILL
-                        b.fill.color = Palette.withAlpha(Palette.CYAN, 200)
-                        for (c in 0 until cols) {
-                            val idx = (c.toFloat() / cols * (backingPeaks.size - 1)).toInt()
-                                .coerceIn(0, backingPeaks.size - 1)
-                            val amp = backingPeaks[idx].coerceIn(0f, 1f) * half
-                            val x = x0 + c
-                            if (amp >= 0.5f) canvas.drawRect(x, mid - amp, x + 1f, mid + amp, b.fill)
-                        }
-                    }
-                }
-            }
-        }
-
-        // ---- 播放头 ----
-        val px = tickToX(playheadTick)
-        if (px in headerWidth..w) {
-            line(canvas, px, 0f, px, h, Palette.RED, dp(1.6f))
-            b.fill.color = Palette.RED
-            b.fill.style = Paint.Style.FILL
-            canvas.drawCircle(px, dp(4f), dp(3.5f), b.fill)
         }
     }
+
+    /** 音频片段：真实波形。峰值已经在导入时算好并缓存。 */
+    private fun drawAudioWave(
+        canvas: Canvas, clip: Clip, l: Float, r: Float, top: Float, bottom: Float
+    ) {
+        val asset = project?.audioAssetById(clip.audioId) ?: return
+        val peaks = audioPeaks[clip.audioId]
+        if (peaks == null || peaks.isEmpty()) {
+            // 素材还没解码完：先画一条中线，别留一块空白。
+            val mid = (top + bottom) / 2f
+            line(canvas, l + dp(2f), mid, r - dp(2f), mid, Palette.withAlpha(Palette.AUDIO, 90), dp(1f))
+            return
+        }
+
+        val mid = (top + bottom) / 2f
+        val half = (bottom - top) / 2f * 0.9f
+        if (half <= 0.5f) return
+
+        // 片段可能只截取了素材的一段：offset/length 是 tick，换算成峰值下标。
+        val bpm = project?.bpm?.coerceAtLeast(1f) ?: 120f
+        val totalTicks = asset.lengthTicks(bpm).coerceAtLeast(1)
+        val fromFrac = (clip.offset.toFloat() / totalTicks).coerceIn(0f, 1f)
+        val toFrac = ((clip.offset + clip.length).toFloat() / totalTicks).coerceIn(0f, 1f)
+        val span = (toFrac - fromFrac).coerceAtLeast(0.001f)
+
+        val cols = (r - l).toInt().coerceIn(1, 900)
+        b.fill.style = Paint.Style.FILL
+        b.fill.color = Palette.withAlpha(Palette.AUDIO, 235)
+        for (c in 0 until cols) {
+            val frac = fromFrac + span * (c.toFloat() / cols)
+            val idx = (frac * (peaks.size - 1)).toInt().coerceIn(0, peaks.size - 1)
+            val amp = peaks[idx].coerceIn(0f, 1f) * half
+            if (amp < 0.4f) continue
+            val x = l + c
+            canvas.drawRect(x, mid - amp, x + 1f, mid + amp, b.fill)
+        }
+        line(canvas, l + dp(2f), mid, r - dp(2f), mid,
+            Palette.withAlpha(Palette.BG, 90), dp(0.8f))
+    }
+
+    /**
+     * 音符片段：把样式里的音符画成能量包络。
+     *
+     * 每列统计落在该时间窗内的音符，按"力度 × 长度贡献"累计，
+     * 归一后画成上下对称柱 —— 鼓 loop 是一串脉冲，铺底是一条宽带子，
+     * 稀疏旋律是几个孤立峰。跟 FL 的观感一致。
+     */
+    private fun drawNoteEnvelope(
+        canvas: Canvas, p: Project, clip: Clip,
+        l: Float, r: Float, top: Float, bottom: Float, color: Int
+    ) {
+        val w = r - l
+        val cols = w.toInt().coerceAtMost(700)
+        if (cols <= 0) return
+        val pat = p.patternById(clip.patternId) ?: return
+        val notes = pat.notesOrNull(clip.track)
+        if (notes == null || notes.isEmpty()) return
+
+        val key = (clip.id * 31) xor cols
+        val energy = scanCache.getOrPut(key) {
+            val e = FloatArray(cols)
+            val span = (clip.end - clip.start).coerceAtLeast(1)
+            for (n in notes) {
+                val absStart = clip.start + n.start - clip.offset
+                val absEnd = absStart + n.length
+                if (absEnd <= clip.start || absStart >= clip.end) continue
+                val c0 = ((max(absStart, clip.start) - clip.start).toFloat() / span * cols)
+                    .toInt().coerceIn(0, cols - 1)
+                val c1 = ((min(absEnd, clip.end) - clip.start).toFloat() / span * cols)
+                    .toInt().coerceIn(0, cols - 1)
+                val amp = (n.velocity / 127f) *
+                    (0.62f + 0.38f * kotlin.math.sqrt(n.length / Note.PPQ.toFloat()))
+                for (c in c0..c1) {
+                    val pos = if (c1 > c0) (c - c0).toFloat() / (c1 - c0) else 0f
+                    val v = amp * (1f - 0.4f * pos)
+                    if (v > e[c]) e[c] = v
+                }
+            }
+            e
+        }
+
+        var maxE = 0f
+        for (v in energy) if (v > maxE) maxE = v
+        if (maxE < 0.001f) return
+
+        val mid = (top + bottom) / 2f
+        val half = (bottom - top) / 2f * 0.92f
+        b.fill.style = Paint.Style.FILL
+        b.fill.color = Palette.withAlpha(color, 210)
+        for (c in 0 until cols) {
+            val e = energy[c] / maxE
+            if (e < 0.02f) continue
+            val amp = half * e
+            val x = l + c
+            canvas.drawRect(x, mid - amp, x + 1.1f, mid + amp, b.fill)
+        }
+        line(canvas, l + dp(2f), mid, r - dp(2f), mid,
+            Palette.withAlpha(Palette.BG, 80), dp(0.8f))
+    }
+
+    private fun drawPlayhead(canvas: Canvas, w: Float, h: Float) {
+        val px = tickToX(playheadTick)
+        if (px < headerWidth || px > w) return
+        line(canvas, px, 0f, px, h, Palette.RED, dp(1.4f))
+        b.fill.color = Palette.RED
+        b.fill.style = Paint.Style.FILL
+        // 顶部一个小三角，比圆点更清楚指着位置。
+        val p = android.graphics.Path()
+        p.moveTo(px - dp(4f), 0f)
+        p.lineTo(px + dp(4f), 0f)
+        p.lineTo(px, dp(6f))
+        p.close()
+        canvas.drawPath(p, b.fill)
+    }
+
+    // ---------------------------------------------------------------- 交互
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val p = project ?: return false
@@ -268,20 +427,18 @@ class PlaylistView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 dragStartX = e.x
-                dragStartY = e.y
                 panX = e.x
                 panY = e.y
 
-                // 标尺：划循环 / 定位
+                // 标尺
                 if (e.y < rulerHeight) {
                     val tick = xToTick(e.x).coerceAtLeast(0)
                     loopAnchor = tick
-                    val nearStart = kotlin.math.abs(tickToX(loopStart) - e.x) < dp(14f)
-                    val nearEnd = kotlin.math.abs(tickToX(loopEnd) - e.x) < dp(14f)
+                    val nearStart = abs(tickToX(loopStart) - e.x) < dp(14f)
+                    val nearEnd = abs(tickToX(loopEnd) - e.x) < dp(14f)
                     if (loopOn && (nearStart || nearEnd)) {
                         drag = Drag.LOOP
-                        loopStart = if (nearStart) tick else loopStart
-                        loopEnd = if (nearEnd) tick else loopEnd
+                        if (nearStart) loopStart = tick else loopEnd = tick
                     } else {
                         drag = Drag.LOOP
                         loopStart = tick
@@ -293,12 +450,6 @@ class PlaylistView @JvmOverloads constructor(
 
                 // 轨道头
                 if (e.x < headerWidth) {
-                    // 伴奏轨头：点开伴奏设置，而不是误选最后一条音轨。
-                    val backingTop = rulerHeight + p.tracks.size.coerceAtLeast(1) * rowHeight - scrollY
-                    if (e.y >= backingTop) {
-                        onBackingTap?.invoke()
-                        return true
-                    }
                     val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
                     if (row in p.tracks.indices) {
                         onSelectTrack?.invoke(row)
@@ -307,35 +458,32 @@ class PlaylistView @JvmOverloads constructor(
                     return true
                 }
 
-                // 空态提示条优先：它在轨道区下方，不能按行号算。
-                if (backingLengthTicks <= 0) {
-                    val trackCount = p.tracks.size.coerceAtLeast(1)
-                    val promptTop = rulerHeight + trackCount * rowHeight - scrollY + dp(2f)
-                    if (e.y in promptTop..(promptTop + dp(34f))) {
-                        onBackingTap?.invoke()
-                        return true
-                    }
-                }
-
-                // 找片段
                 val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
                 if (row !in p.tracks.indices) return true
                 val tick = xToTick(e.x)
-                val clip = p.clips.lastOrNull { it.track == row && tick >= it.start && tick < it.end }
+                val clip = p.clips.lastOrNull {
+                    it.track == row && tick >= it.start && tick < it.end
+                }
 
                 if (clip != null) {
                     activeClip = clip
                     origStart = clip.start
                     origLen = clip.length
-                    origTrack = clip.track
-                    drag = if (tickToX(clip.end) - e.x < dp(16f)) Drag.RESIZE_R else Drag.MOVE
+                    origOffset = clip.offset
+                    val nearRight = tickToX(clip.end) - e.x < dp(16f)
+                    val nearLeft = e.x - tickToX(clip.start) < dp(16f) && !nearRight
+                    drag = when {
+                        nearRight -> Drag.RESIZE_R
+                        // 左缘拖动是"裁头"：起点和素材偏移一起走，内容才不会跳。
+                        nearLeft && clip.isAudio -> Drag.RESIZE_L
+                        else -> Drag.MOVE
+                    }
                     onSelectTrack?.invoke(row)
-                    onClipTapped?.invoke(clip)
+                    if (clip.isAudio) onAudioTap?.invoke(clip) else onClipTapped?.invoke(clip)
                     invalidate()
                 } else {
-                    // 空白处：定位播放头
                     drag = Drag.SEEK
-                    onSeek?.invoke(xToTick(e.x).coerceAtLeast(0))
+                    onSeek?.invoke(tick.coerceAtLeast(0))
                     onSelectTrack?.invoke(row)
                 }
                 return true
@@ -348,21 +496,20 @@ class PlaylistView @JvmOverloads constructor(
                 panY = (e.getY(0) + e.getY(1)) / 2f
                 return true
             }
+
             MotionEvent.ACTION_MOVE -> {
-                if (drag == Drag.SEEK && kotlin.math.abs(e.x - dragStartX) > dp(12f)) drag = Drag.PAN
+                if (drag == Drag.SEEK && abs(e.x - dragStartX) > dp(12f)) drag = Drag.PAN
                 when (drag) {
                     Drag.PAN -> {
                         val mx = if (e.pointerCount >= 2) (e.getX(0) + e.getX(1)) / 2f else e.x
                         val my = if (e.pointerCount >= 2) (e.getY(0) + e.getY(1)) / 2f else e.y
                         scrollX = (scrollX - (mx - panX)).coerceAtLeast(0f)
-                        val laneH = if (backingLengthTicks > 0) dp(72f) else dp(40f)
-                        val contentH = p.tracks.size.coerceAtLeast(1) * rowHeight + laneH
-                        scrollY = (scrollY - (my - panY)).coerceIn(0f, max(0f, contentH - height + rulerHeight))
+                        scrollY = (scrollY - (my - panY))
+                            .coerceIn(0f, max(0f, contentH - height + rulerHeight))
                         panX = mx
                         panY = my
                         invalidate()
                     }
-                    Drag.SEEK -> Unit
                     Drag.LOOP -> {
                         val tick = xToTick(e.x).coerceAtLeast(0)
                         loopStart = min(loopAnchor, tick)
@@ -371,19 +518,31 @@ class PlaylistView @JvmOverloads constructor(
                     }
                     Drag.MOVE -> {
                         val c = activeClip ?: return true
-                        val dTicks = xToTick(e.x) - xToTick(dragStartX)
-                        val newStart = (origStart + dTicks).coerceAtLeast(0)
-                        val newRow = ((e.y - rulerHeight + scrollY) / rowHeight).toInt().coerceIn(0, p.tracks.size - 1)
-                        // 吸附到十六分
-                        c.start = (Math.round(newStart.toFloat() / Note.STEP) * Note.STEP).coerceAtLeast(0)
-                        c.track = newRow
+                        val d = snapTick(xToTick(e.x) - xToTick(dragStartX))
+                        c.start = (origStart + d).coerceAtLeast(0)
+                        c.track = ((e.y - rulerHeight + scrollY) / rowHeight)
+                            .toInt().coerceIn(0, p.tracks.size - 1)
                         invalidate()
                     }
                     Drag.RESIZE_R -> {
                         val c = activeClip ?: return true
-                        val dTicks = xToTick(e.x) - xToTick(dragStartX)
-                        val newLen = (origLen + dTicks).coerceAtLeast(Note.STEP * 2)
-                        c.length = Math.round(newLen.toFloat() / Note.STEP) * Note.STEP
+                        val d = snapTick(xToTick(e.x) - xToTick(dragStartX))
+                        c.length = (origLen + d).coerceAtLeast(Note.STEP)
+                        invalidate()
+                    }
+                    Drag.RESIZE_L -> {
+                        val c = activeClip ?: return true
+                        val d = snapTick(xToTick(e.x) - xToTick(dragStartX))
+                        // 左缘拖动时起点跟着走，但长度与素材偏移反向补偿，
+                        // 这样"露出来的那部分音频"保持不动 —— 和 FL 的裁剪一致。
+                        val newStart = (origStart + d).coerceAtLeast(0)
+                        val actual = newStart - origStart
+                        val newLen = origLen - actual
+                        if (newLen >= Note.STEP) {
+                            c.start = newStart
+                            c.length = newLen
+                            c.offset = (origOffset + actual).coerceAtLeast(0)
+                        }
                         invalidate()
                     }
                     else -> {}
@@ -397,8 +556,14 @@ class PlaylistView @JvmOverloads constructor(
                     loopOn = true
                     onLoopChanged?.invoke(true, loopStart, loopEnd)
                 }
-                if (drag == Drag.MOVE || drag == Drag.RESIZE_R) {
+                if (drag == Drag.MOVE || drag == Drag.RESIZE_R || drag == Drag.RESIZE_L) {
+                    scanCache.clear()
                     onClipsChanged?.invoke()
+                }
+                if (drag == Drag.SEEK) {
+                    // 空点一下：交给外面判断要不要弹导入入口。
+                    val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
+                    if (row in p.tracks.indices) onEmptyTap?.invoke(row, xToTick(e.x).coerceAtLeast(0))
                 }
                 drag = Drag.NONE
                 activeClip = null
@@ -407,80 +572,6 @@ class PlaylistView @JvmOverloads constructor(
             }
         }
         return true
-    }
-
-    /**
-     * 把片段里的音符画成波形包络。
-     *
-     * 每个像素列统计落在这段时间里的音符：数量、力度、持续长度。
-     * 三者相乘近似"这一列的响度"，归一后画成上下对称的柱。
-     * 结果是：鼓 loop 看起来是一串均匀的脉冲，和弦铺底是一条厚实的带子，
-     * 稀疏的旋律是几个孤立的峰 —— 跟 FL 里的观感一致。
-     */
-    private fun drawWaveform(
-        canvas: Canvas,
-        clip: Clip,
-        notes: List<Note>,
-        l: Float, r: Float, top: Float, bottom: Float,
-        color: Int
-    ) {
-        val w = r - l
-        if (w <= 2f) return
-
-        val cols = w.toInt().coerceAtMost(600)
-        if (cols <= 0) return
-        val energy = FloatArray(cols)
-
-        val clipStartTick = clip.start
-        val clipEndTick = clip.end
-        val innerH = (bottom - top) - dp(6f)
-        if (innerH <= 0f) return
-
-        for (n in notes) {
-            // 音符在时间线上的绝对区间
-            val nAbsStart = clipStartTick + n.start - clip.offset
-            val nAbsEnd = nAbsStart + n.length
-            if (nAbsEnd <= clipStartTick || nAbsStart >= clipEndTick) continue
-
-            // 映射到像素列
-            val c0 = ((maxOf(nAbsStart, clipStartTick) - clipStartTick).toFloat() /
-                    (clipEndTick - clipStartTick) * cols).toInt().coerceIn(0, cols - 1)
-            val c1 = ((minOf(nAbsEnd, clipEndTick) - clipStartTick).toFloat() /
-                    (clipEndTick - clipStartTick) * cols).toInt().coerceIn(0, cols - 1)
-
-            // 单音的"响度"：力度归一，长度的贡献开方衰减（长音不该压过重音）
-            val amp = (n.velocity / 127f) * (0.6f + 0.4f * kotlin.math.sqrt(n.length / Note.PPQ.toFloat()))
-            for (c in c0..c1) {
-                // 起音处更强，尾音渐弱 —— 模拟真实波形包络
-                val posInNote = if (c1 > c0) (c - c0).toFloat() / (c1 - c0) else 0f
-                val decay = 1f - 0.45f * posInNote
-                val v = amp * decay
-                if (v > energy[c]) energy[c] = v
-            }
-        }
-
-        // 归一
-        var maxE = 0f
-        for (v in energy) if (v > maxE) maxE = v
-        if (maxE < 0.001f) return
-
-        val mid = (top + bottom) / 2f
-        val halfH = innerH / 2f
-
-        b.fill.color = Palette.withAlpha(color, 235)
-        b.fill.style = Paint.Style.FILL
-
-        for (c in 0 until cols) {
-            val e = energy[c] / maxE
-            if (e < 0.01f) continue
-            val h = halfH * e
-            val x = l + c.toFloat()
-            // 上下对称画，像波形
-            canvas.drawRect(x, mid - h, x + 1.2f, mid + h, b.fill)
-        }
-
-        // 中线
-        line(canvas, l, mid, r, mid, Palette.withAlpha(Palette.BG, 70), dp(0.8f))
     }
 
     fun scrollByX(px: Float) {
@@ -497,4 +588,3 @@ class PlaylistView @JvmOverloads constructor(
         }
     }
 }
-

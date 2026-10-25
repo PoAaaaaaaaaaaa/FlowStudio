@@ -22,11 +22,9 @@ class Project {
     /** 摇摆量 0..1，0 是正拍。0.5 大约是三连音的摇摆感。 */
     var swing: Float = 0f
 
-    /** 伴奏引用与播放设置。只存路径与参数，音频本体不入 JSON。 */
-    var backingFile: String = ""
-    var backingStartTick: Int = 0
-    var backingGain: Float = 0.85f
-    var backingMuted: Boolean = false
+    /** 音频素材表。本体在 filesDir/audio/ 下，这里只记引用。 */
+    val audioAssets = mutableListOf<AudioAsset>()
+    var nextAudioId: Int = 1
 
     /** 节拍器音量 0..1 */
     var metronomeVolume: Float = 0.6f
@@ -57,6 +55,27 @@ class Project {
     fun patternById(id: Int): Pattern? = patterns.firstOrNull { it.id == id }
     fun patternIndexOf(id: Int): Int = patterns.indexOfFirst { it.id == id }
     fun trackAt(i: Int): Track? = tracks.getOrNull(i)
+
+    fun audioAssetById(id: Int): AudioAsset? = audioAssets.firstOrNull { it.id == id }
+
+    /** 把素材摆到某条轨道的某个位置，返回新片段。长度默认铺满整段素材。 */
+    fun placeAudio(
+        asset: AudioAsset, track: Int, startTick: Int, lengthTicks: Int = 0
+    ): Clip {
+        val len = if (lengthTicks > 0) lengthTicks else asset.lengthTicks(bpm)
+        val c = Clip(
+            id = nextClipId++,
+            patternId = -1,
+            track = track.coerceIn(0, maxOf(0, tracks.size - 1)),
+            start = startTick.coerceAtLeast(0),
+            length = len.coerceAtLeast(Note.STEP),
+            offset = 0,
+            label = "",
+            audioId = asset.id
+        )
+        clips.add(c)
+        return c
+    }
 
     fun lengthTicks(): Int = maxOf(barTicks * 16, clips.maxOfOrNull { it.end } ?: 0)
     fun lengthBars(): Int = (lengthTicks() + barTicks - 1) / barTicks
@@ -228,10 +247,8 @@ class Project {
         put("keyRoot", keyRoot)
         put("scaleName", scaleName)
         put("swing", swing.toDouble())
-        put("backingFile", backingFile)
-        put("backingStartTick", backingStartTick)
-        put("backingGain", backingGain.toDouble())
-        put("backingMuted", backingMuted)
+        put("nextAudioId", nextAudioId)
+        put("audio", JSONArray().apply { audioAssets.forEach { put(it.toJson()) } })
         put("metronomeVolume", metronomeVolume.toDouble())
         put("masterVolume", masterVolume)
         put("masterLimiter", masterLimiter)
@@ -263,10 +280,16 @@ class Project {
             p.keyRoot = o.optString("keyRoot", "C")
             p.scaleName = o.optString("scaleName", "chromatic")
             p.swing = o.optDouble("swing", 0.0).toFloat().coerceIn(0f, 1f)
-            p.backingFile = o.optString("backingFile", "")
-            p.backingStartTick = o.optInt("backingStartTick", 0).coerceAtLeast(0)
-            p.backingGain = o.optDouble("backingGain", 0.85).toFloat().coerceIn(0f, 1.5f)
-            p.backingMuted = o.optBoolean("backingMuted", false)
+            p.nextAudioId = o.optInt("nextAudioId", 1)
+            o.optJSONArray("audio")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.let {
+                        val a = AudioAsset.fromJson(it)
+                        p.audioAssets.add(a)
+                        p.nextAudioId = maxOf(p.nextAudioId, a.id + 1)
+                    }
+                }
+            }
             p.metronomeVolume = o.optDouble("metronomeVolume", 0.6).toFloat().coerceIn(0f, 1f)
             p.masterVolume = o.optInt("masterVolume", 80).coerceIn(0, 100)
             p.masterLimiter = o.optBoolean("masterLimiter", true)

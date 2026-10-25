@@ -446,12 +446,21 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
         if (channels_[(size_t)i].solo) { anySolo = true; break; }
     }
 
+    // 音频片段快照：整块取得一次，回调期间不可能被替换或释放。
+    // 按轨道分桶，避免在逐轨循环里重复遍历全表。
+    const auto clipSnapshot = std::atomic_load(&audioClips_);
+    const std::vector<AudioClip>* clips = clipSnapshot ? clipSnapshot.get() : nullptr;
+    for (int t = 0; t < kMaxTracks; t++) audioBucket_[t].clear();
+    if (clips) {
+        for (const auto& c : *clips) {
+            if (c.track >= 0 && c.track < kMaxTracks && c.buffer && c.buffer->frames > 0) {
+                audioBucket_[c.track].push_back(&c);
+            }
+        }
+    }
+
     for (int t = 0; t < trackCount; t++) {
         Channel& ch = channels_[(size_t)t];
-
-        if (!isPlaying) {
-            // 停止状态下仍要处理残响尾巴，否则松开按键会咔一声断掉
-        }
 
         applyAutomation(t, pos, ch);
 
@@ -459,7 +468,12 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
         for (const auto& v : voices_) {
             if (v.active && v.track == t) { hasVoice = true; break; }
         }
-        if (!hasVoice) {
+        // 静音轨不必渲染音频片段：它最终会被增益压成 0，
+        // 但增益平滑是"趋近"而不是"等于"，残值会在母线里挂几百毫秒。
+        // 直接不喂数据，比事后压干净更省 CPU，也彻底没有漏音。
+        const bool audibleNow = !ch.mute && (!anySolo || ch.solo);
+        const bool hasAudio = isPlaying && audibleNow && !audioBucket_[t].empty();
+        if (!hasVoice && !hasAudio) {
             if (t < (int)trackPeakVec_.size()) trackPeakVec_[(size_t)t] *= 0.80f;
             continue;
         }
@@ -471,6 +485,14 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
             if (!v.active || v.track != t) continue;
             if (!v.render(busL_.data(), busR_.data(), frames, ch.params, sampleRate_)) {
                 v.active = false;
+            }
+        }
+
+        // 音频片段混进同一条总线：这样它自然获得该轨道的音量、声像和四个插入效果，
+        // 与合成音符完全同权 —— 这才是"音频片段"而不是"全局伴奏"。
+        if (hasAudio) {
+            for (const AudioClip* c : audioBucket_[t]) {
+                renderAudioClip(*c, busL_.data(), busR_.data(), frames, pos, tps, bpmNow);
             }
         }
 
@@ -556,45 +578,13 @@ void Engine::renderBlockClean(float* outL, float* outR, int frames) {
     }
 
     // ---- 5. 母带 ----
+    // 音频片段已经在第 2 段混进各轨总线，这里只剩总线、发送与母带。
     const float mg = dbToGain(masterGainDb_);
-    // ---- 伴奏轨：按工程位置线性读取，与音乐一起进母带 ----
-    // 原子取得不可变快照，回调期间数据不可能被释放或改写。
-    const auto backingSnapshot = std::atomic_load(&backingBuffer_);
-    const float* backing = backingSnapshot ? backingSnapshot->samples.data() : nullptr;
-    const int bFrames = backingSnapshot ? backingSnapshot->frames : 0;
-    const int bRate = backingSnapshot ? backingSnapshot->sampleRate : 48000;
-    const double backingStartTick = backingSnapshot ? backingSnapshot->startTick : 0.0;
-    const bool bMute = backingMute_.load(std::memory_order_relaxed);
-    const float bGain = backingGain_.load(std::memory_order_relaxed);
-    const bool bActive = backing && bFrames > 0 && !bMute && bGain > 0.0001f;
 
     float peakL = 0.f, peakR = 0.f;
     for (int i = 0; i < frames; i++) {
         float a = (outL[i] + revL_[(size_t)i] * 0.55f + dlyL_[(size_t)i] * 0.45f) * busTrim;
         float b = (outR[i] + revR_[(size_t)i] * 0.55f + dlyR_[(size_t)i] * 0.45f) * busTrim;
-
-        if (bActive) {
-            // 每帧都从工程 tick 换算到伴奏秒数，保证变速/跳转/循环后仍然对齐。
-            // 用位置换算而不是累加游标：累加会在 seek 后累积误差。
-            const double tickNow = pos + tps * (double)i;
-            const double secRel = (tickNow - backingStartTick) / (double)kPPQ
-                                  * (60.0 / (double)bpmNow);
-            if (secRel >= 0.0) {
-                const double framePos = secRel * (double)bRate;
-                const int idx = (int)framePos;
-                if (idx >= 0 && idx < bFrames) {
-                    const int next = (idx + 1 < bFrames) ? idx + 1 : idx;
-                    const float frac = (float)(framePos - (double)idx);
-                    const float l0 = backing[(size_t)idx * 2];
-                    const float r0 = backing[(size_t)idx * 2 + 1];
-                    const float l1 = backing[(size_t)next * 2];
-                    const float r1 = backing[(size_t)next * 2 + 1];
-                    // 线性插值：避免采样率不一致时的锯齿噪声。
-                    a += (l0 + (l1 - l0) * frac) * bGain;
-                    b += (r0 + (r1 - r0) * frac) * bGain;
-                }
-            }
-        }
 
         const float vol = masterSm_.process(masterVolume_);
         a *= vol * mg;
@@ -789,23 +779,126 @@ void Engine::clearSample() {
     g_sampleFrames = 0;
 }
 
-void Engine::setBackingTrack(const float* interleaved, int frames, int sampleRate,
-                             double startTick, float gain) {
-    if (!interleaved || frames <= 0 || sampleRate <= 0) return;
-    // 构造后不再修改，原子交换让当前回调继续使用旧快照，随后自然释放。
-    auto fresh = std::make_shared<BackingBuffer>();
-    fresh->samples.assign(interleaved, interleaved + (size_t)frames * 2);
-    fresh->frames = frames;
-    fresh->sampleRate = sampleRate;
-    fresh->startTick = std::max(0.0, startTick);
-    std::atomic_store(&backingBuffer_, std::shared_ptr<const BackingBuffer>(fresh));
-    backingGain_.store(clampf(gain, 0.f, 1.5f));
-    backingSeek_.store(true);
+// ================================================================ 音频片段
+
+void Engine::setAudioClips(const std::vector<AudioClip>& clips) {
+    // 整体替换：构造一份新的不可变表，原子换上去。
+    // 正在跑的回调继续用旧表跑到块尾，然后自然释放 —— 没有锁，也没有中间态。
+    auto fresh = std::make_shared<std::vector<AudioClip>>(clips);
+    std::atomic_store(&audioClips_, std::shared_ptr<const std::vector<AudioClip>>(fresh));
 }
 
-void Engine::clearBackingTrack() {
-    std::atomic_store(&backingBuffer_, std::shared_ptr<const BackingBuffer>());
-    backingCursor_.store(0.0);
+void Engine::clearAudioClips() {
+    std::atomic_store(&audioClips_, std::shared_ptr<const std::vector<AudioClip>>());
+}
+
+int Engine::audioClipCount() const {
+    auto snap = std::atomic_load(&audioClips_);
+    return snap ? (int)snap->size() : 0;
+}
+
+void Engine::setAudioBuffer(int32_t id, const float* interleaved, int frames, int sampleRate) {
+    if (!interleaved || frames <= 0 || sampleRate <= 0) return;
+    auto buf = std::make_shared<AudioBuffer>();
+    buf->samples.assign(interleaved, interleaved + (size_t)frames * 2);
+    buf->frames = frames;
+    buf->sampleRate = sampleRate;
+    std::lock_guard<std::mutex> lock(buffersMutex_);
+    audioBuffers_[id] = std::shared_ptr<const AudioBuffer>(buf);
+}
+
+void Engine::clearAudioBuffers() {
+    std::lock_guard<std::mutex> lock(buffersMutex_);
+    audioBuffers_.clear();
+}
+
+bool Engine::hasAudioBuffer(int32_t id) const {
+    std::lock_guard<std::mutex> lock(buffersMutex_);
+    return audioBuffers_.find(id) != audioBuffers_.end();
+}
+
+/**
+ * 按素材 id 装配片段表。
+ *
+ * 拖动一个音频片段时只改它的 startTick，素材本身不该再跨一次 JNI ——
+ * 一首三分钟的歌是 30 MB 的 float，每次拖动都拷一遍会直接卡死界面。
+ * 所以素材进池子一次，这里只搬 id 和布局。
+ */
+void Engine::setAudioClipsById(const std::vector<int32_t>& bufferIds,
+                               const std::vector<int32_t>& tracks,
+                               const std::vector<double>& startTicks,
+                               const std::vector<int64_t>& offsetFrames,
+                               const std::vector<int64_t>& lengthFrames,
+                               const std::vector<float>& gains) {
+    const size_t n = bufferIds.size();
+    std::vector<AudioClip> out;
+    out.reserve(n);
+    {
+        std::lock_guard<std::mutex> lock(buffersMutex_);
+        for (size_t i = 0; i < n; i++) {
+            auto it = audioBuffers_.find(bufferIds[i]);
+            if (it == audioBuffers_.end()) continue;
+            AudioClip c;
+            c.buffer = it->second;
+            c.track = (i < tracks.size()) ? tracks[i] : 0;
+            c.startTick = (i < startTicks.size()) ? std::max(0.0, startTicks[i]) : 0.0;
+            c.offsetFrames = (i < offsetFrames.size()) ? offsetFrames[i] : 0;
+            c.lengthFrames = (i < lengthFrames.size()) ? lengthFrames[i] : 0;
+            c.gain = (i < gains.size()) ? clampf(gains[i], 0.f, 4.f) : 1.f;
+            out.push_back(std::move(c));
+        }
+    }
+    setAudioClips(out);
+}
+
+/**
+ * 把一段音频片段叠进所属轨道的总线。
+ *
+ * 位置换算走"工程 tick → 相对秒数 → 素材帧号"，每帧从 pos 重新算，
+ * 不累加游标：累加在 seek、循环、改 BPM 之后都会累积误差，越播越偏。
+ * 采样率不一致时线性插值，避免阶梯噪声。
+ */
+void Engine::renderAudioClip(const AudioClip& clip, float* busL, float* busR,
+                             int frames, double pos, double tps, float bpmNow) {
+    const AudioBuffer* buf = clip.buffer.get();
+    if (!buf || buf->frames <= 0 || buf->sampleRate <= 0) return;
+
+    const double startTick = clip.startTick;
+    const int64_t offset = std::max<int64_t>(0, clip.offsetFrames);
+    const int64_t avail = (int64_t)buf->frames - offset;
+    if (avail <= 0) return;
+    // lengthFrames <= 0 视为"播到素材末尾"，这样片段长度可以跟着素材走。
+    const int64_t length = clip.lengthFrames > 0 ? std::min(clip.lengthFrames, avail) : avail;
+    if (length <= 0) return;
+
+    const float g = clampf(clip.gain, 0.f, 4.f);
+    if (g <= 0.0001f) return;
+
+    const double rate = (double)buf->sampleRate;
+    const double ticksPerSec = (double)kPPQ * (double)bpmNow / 60.0;
+
+    for (int i = 0; i < frames; i++) {
+        const double tickNow = pos + tps * (double)i;
+        if (tickNow < startTick) continue;
+
+        const double elapsedSec = (tickNow - startTick) / ticksPerSec;
+        const double framePos = elapsedSec * rate;
+        const int64_t rel = (int64_t)framePos;
+        if (rel >= length) continue;    // 片段已播完，本块剩余帧不再取
+
+        const int64_t idx = offset + rel;
+        if (idx < 0 || idx >= buf->frames) continue;
+        const int64_t next = std::min<int64_t>(idx + 1, buf->frames - 1);
+        const float frac = (float)(framePos - (double)rel);
+
+        const float l0 = buf->samples[(size_t)idx * 2];
+        const float r0 = buf->samples[(size_t)idx * 2 + 1];
+        const float l1 = buf->samples[(size_t)next * 2];
+        const float r1 = buf->samples[(size_t)next * 2 + 1];
+
+        busL[i] += (l0 + (l1 - l0) * frac) * g;
+        busR[i] += (r0 + (r1 - r0) * frac) * g;
+    }
 }
 
 }  // namespace flow

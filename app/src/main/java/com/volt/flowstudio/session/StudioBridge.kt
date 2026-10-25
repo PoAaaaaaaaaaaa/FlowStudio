@@ -548,13 +548,11 @@ class StudioBridge(
                 method == "POST" && path == "/notes/transform" -> handleNotesTransform(body)
                 // 试听某个音符（不写入，只发声）
                 method == "POST" && path == "/audition" -> handleAudition(body)
-                method == "GET" && path == "/backing" -> 200 to backingJson()
-                method == "POST" && path == "/backing/import" -> handleBackingImport(body)
-                method == "POST" && path == "/backing/settings" -> handleBackingSettings(body)
-                method == "POST" && path == "/backing/clear" -> {
-                    runOnMain { session.clearBacking() }
-                    200 to backingJson()
-                }
+                // 音频：素材列表 + 导入 + 删除。片段本身走 /clips*。
+                method == "GET" && path == "/audio" -> 200 to audioJson()
+                method == "POST" && path == "/audio/import" -> handleAudioImport(body)
+                method == "DELETE" && path.startsWith("/audio/") ->
+                    handleDeleteAudio(path.removePrefix("/audio/").toIntOrNull())
                 method == "POST" && path == "/clips" -> handleAddClip(body)
                 method == "DELETE" && path.startsWith("/clips/") ->
                     handleDeleteClip(path.removePrefix("/clips/").toIntOrNull())
@@ -1157,82 +1155,98 @@ class StudioBridge(
         return 200 to JSONObject().put("ok", true).put("pitch", pitch)
     }
 
-    /** 伴奏状态：时长按当前 BPM 换算成 tick，插件可直接排结构。 */
-    private fun backingJson(): JSONObject {
-        val b = session.backing
+    /** 音频素材列表。每段带时长与在当前 BPM 下占多少 tick，插件可直接排结构。 */
+    private fun audioJson(): JSONObject {
         val p = session.project
-        val seconds = if (b.sampleRate > 0) b.frames.toDouble() / b.sampleRate else 0.0
-        val lengthTicks = (seconds * p.bpm / 60.0 * Note.PPQ).toInt()
+        val arr = JSONArray()
+        for (a in p.audioAssets) {
+            arr.put(JSONObject()
+                .put("id", a.id)
+                .put("name", a.name)
+                .put("frames", a.frames)
+                .put("sampleRate", a.sampleRate)
+                .put("durationSec", a.durationSec.toDouble())
+                .put("lengthTicks", a.lengthTicks(p.bpm))
+                .put("path", a.path))
+        }
+        val clips = JSONArray()
+        for (c in p.clips.filter { it.isAudio }) {
+            clips.put(JSONObject()
+                .put("id", c.id)
+                .put("audioId", c.audioId)
+                .put("track", c.track)
+                .put("start", c.start)
+                .put("length", c.length)
+                .put("offset", c.offset)
+                .put("gain", c.audioGain.toDouble()))
+        }
         return JSONObject()
             .put("ok", true)
-            .put("loaded", b.loaded)
-            .put("name", b.fileName)
-            .put("frames", b.frames)
-            .put("sampleRate", b.sampleRate)
-            .put("durationSec", seconds)
-            .put("startTick", b.startTick)
-            .put("lengthTicks", lengthTicks)
-            .put("gain", b.gain.toDouble())
-            .put("muted", b.muted)
+            .put("count", p.audioAssets.size)
+            .put("assets", arr)
+            .put("clips", clips)
     }
 
     /**
-     * 直接接收 WAV 字节并导入为伴奏。
+     * 接收 WAV 字节并导入为音频素材，同时摆到指定轨道/位置。
      * base64 解码后写临时文件，走与界面完全相同的解码与校验路径，
      * 不新增第二套音频解析逻辑。
      */
-    private fun handleBackingImport(body: String): Pair<Int, JSONObject> {
+    private fun handleAudioImport(body: String): Pair<Int, JSONObject> {
         val o = JSONObject(body)
         val b64 = o.optString("wavBase64", "")
         if (b64.length < 64) return 400 to JSONObject().put("error", "需要 wavBase64")
         val raw = runCatching { android.util.Base64.decode(b64, android.util.Base64.DEFAULT) }.getOrNull()
             ?: return 400 to JSONObject().put("error", "wavBase64 解码失败")
         if (raw.size < 64) return 400 to JSONObject().put("error", "音频数据为空")
-        if (raw.size > 48 * 1024 * 1024) return 413 to JSONObject().put("error", "音频过大（上限 48 MB）")
-        val tmp = File(session.appContext().cacheDir, "bridge-backing-import.wav")
-        val written = runCatching { tmp.writeBytes(raw) }.isSuccess
-        if (!written) return 500 to JSONObject().put("error", "无法写入临时文件")
+        if (raw.size > 96 * 1024 * 1024) return 413 to JSONObject().put("error", "音频过大（上限 96 MB）")
+        val name = o.optString("name", "音频.wav")
+        val tmp = File(session.appContext().cacheDir, "bridge-audio-import.wav")
+        if (!runCatching { tmp.writeBytes(raw) }.isSuccess) {
+            return 500 to JSONObject().put("error", "无法写入临时文件")
+        }
 
         val latch = java.util.concurrent.CountDownLatch(1)
         var ok = false
         var msg = ""
-        session.importBacking(tmp) { success, message ->
+        session.importAudio(tmp, name) { success, message ->
             ok = success
             msg = message
             latch.countDown()
         }
-        val finished = latch.await(20, java.util.concurrent.TimeUnit.SECONDS)
+        val finished = latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
         if (!finished) return 504 to JSONObject().put("error", "导入超时（音频可能过长）")
         if (!ok) return 400 to JSONObject().put("error", msg)
-        val p = o.optInt("startTick", Int.MIN_VALUE)
-        if (p != Int.MIN_VALUE) {
-            runOnMain { session.backing.setStartTick(p.coerceAtLeast(0), session.project); session.scheduleAutoSave() }
-        }
-        if (o.has("gain")) {
-            val g = o.optDouble("gain", 0.85).toFloat()
-            runOnMain { session.backing.setGain(g, session.project); session.scheduleAutoSave() }
-        }
-        if (o.has("muted")) {
-            val m = o.optBoolean("muted", false)
-            runOnMain { session.backing.setMuted(m, session.project); session.scheduleAutoSave() }
+
+        // importAudio 已经按当前选中轨与播放头摆好了；这里按请求微调。
+        val asset = session.project.audioAssets.lastOrNull()
+        if (asset != null) {
+            val clip = session.project.clips.lastOrNull { it.audioId == asset.id }
+            if (clip != null) {
+                if (o.has("track")) {
+                    clip.track = o.optInt("track", clip.track)
+                        .coerceIn(0, maxOf(0, session.project.tracks.size - 1))
+                }
+                if (o.has("startTick")) clip.start = o.optInt("startTick", clip.start).coerceAtLeast(0)
+                if (o.has("length")) clip.length = o.optInt("length", clip.length).coerceAtLeast(Note.STEP)
+                if (o.has("gain")) clip.audioGain = o.optDouble("gain", 1.0).toFloat().coerceIn(0f, 2f)
+                runOnMain { session.pushAudioClips(); session.scheduleAutoSave() }
+            }
         }
         bumpRevision()
-        session.notifyExternalEdit("导入伴奏")
-        return 200 to backingJson().put("message", msg)
+        session.notifyExternalEdit("导入音频")
+        return 200 to audioJson().put("message", msg)
     }
 
-    private fun handleBackingSettings(body: String): Pair<Int, JSONObject> {
-        val o = JSONObject(body)
-        val ok = runOnMain {
-            if (o.has("gain")) session.backing.setGain(o.optDouble("gain", 0.85).toFloat(), session.project)
-            if (o.has("muted")) session.backing.setMuted(o.optBoolean("muted", false), session.project)
-            if (o.has("startTick")) session.backing.setStartTick(o.optInt("startTick", 0), session.project)
-            session.scheduleAutoSave()
+    private fun handleDeleteAudio(assetId: Int?): Pair<Int, JSONObject> {
+        if (assetId == null) return 400 to JSONObject().put("error", "素材 id 不合法")
+        if (session.project.audioAssetById(assetId) == null) {
+            return 404 to JSONObject().put("error", "没有 id=$assetId 的音频素材")
         }
-        if (!ok) return 503 to JSONObject().put("error", "应用繁忙")
+        runOnMain { session.removeAudioAsset(assetId) }
         bumpRevision()
-        session.notifyExternalEdit("调整伴奏")
-        return 200 to backingJson()
+        session.notifyExternalEdit("删除音频")
+        return 200 to audioJson()
     }
 
     private fun handleAddClip(body: String): Pair<Int, JSONObject> {
@@ -1328,7 +1342,7 @@ class StudioBridge(
                 "batch", "clips.arrange", "clips.patch", "automation.upsert",
                 "pattern.create", "pattern.patch", "pattern.delete", "tracks.reorder",
                 "undo", "selection", "events.longpoll", "events.sse",
-                "notes.fine", "track.group"
+                "notes.fine", "track.group", "audio.import", "audio.clips"
             )))
             .put("limits", JSONObject()
                 .put("batchOps", 200)
@@ -1647,7 +1661,11 @@ class StudioBridge(
                     .put("startTicks", c.start)
                     .put("lengthTicks", c.length)
                     .put("offsetTicks", c.offset)
-                    .put("label", c.label))
+                    .put("label", c.label)
+                    .put("audioId", c.audioId)
+                    .put("audioName", if (c.isAudio)
+                        session.project.audioAssetById(c.audioId)?.name ?: "" else "")
+                    .put("audioGain", c.audioGain.toDouble()))
             }
         })
 

@@ -84,19 +84,14 @@ class TransportBar @JvmOverloads constructor(
         compact = w < dp(600f)
         boxes.clear()
         if (bottomMode) {
-            // 底部控制条做成浮起的圆角卡片，与内容区分层。
+            // 底栏不再画成"浮起的卡片"：那层高光加描边会跟内容区抢注意力。
+            // 现在它只是一块比画布略亮的横条，靠明度分层，不靠线。
             rect(canvas, 0f, 0f, w, h, Palette.BG)
-            rect(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f), Palette.SURFACE, dp(16f))
-            // 顶部一条极浅高光，让卡片看起来是"浮起"而不是"挖空"。
-            rect(canvas, dp(8f) + dp(14f), dp(4f), w - dp(8f) - dp(14f), dp(5f),
-                Palette.withAlpha(Palette.TEXT, 22), dp(1f))
-            outline(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f),
-                Palette.withAlpha(Palette.LINE, 180), dp(16f), dp(0.8f))
+            rect(canvas, 0f, dp(3f), w, h, Palette.SURFACE, dp(14f))
             if (playing) {
-                // 播放态只留一条静止的细指示线，不再做流光。
-                // 动画光带在停手时也会持续重绘，是画面"吵"和耗电的来源之一。
-                rect(canvas, dp(8f) + dp(16f), dp(4f), dp(8f) + dp(16f) + dp(52f), dp(5.2f),
-                    Palette.withAlpha(Palette.ACCENT, 120), dp(1f))
+                // 播放态：一条很短的强调线贴在最上沿，只提示"在走"，不闪。
+                rect(canvas, dp(16f), dp(3f), dp(16f) + dp(44f), dp(4.4f),
+                    Palette.withAlpha(Palette.ACCENT, 190), dp(1f))
             }
         } else {
             rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
@@ -136,8 +131,10 @@ class TransportBar @JvmOverloads constructor(
         // 播放键用"描边 + 图标"，不再整块填色：整块高饱和色块是最抢眼的部分。
         val pr = boxes.getValue(Control.PLAY)
         rect(canvas, pr[0], pr[1], pr[2], pr[3], Palette.PANEL_HI, dp(10f))
-        outline(canvas, pr[0], pr[1], pr[2], pr[3],
-            if (playing) Palette.ACCENT else Palette.withAlpha(Palette.LINE, 170), dp(10f), dp(1.2f))
+        if (playing) {
+            // 只有正在播放时才给播放键一圈强调色：整屏唯一的高光在这里。
+            outline(canvas, pr[0], pr[1], pr[2], pr[3], Palette.ACCENT, dp(10f), dp(1.3f))
+        }
         drawPlayIcon(canvas)
         gx += playW + gap
 
@@ -285,12 +282,14 @@ class TransportBar @JvmOverloads constructor(
 
     private fun playWidth(key: Control): Float = boxes.getValue(key).let { it[2] - it[0] }
 
+    /**
+     * 按钮底。常态无描边 —— 描边会让一排按钮看起来像表格。
+     * 只有按下时才提亮，反馈靠明度变化而不是边框。
+     */
     private fun drawButton(canvas: Canvas, key: Control, color: Int) {
         val r = boxes.getValue(key)
-        rect(canvas, r[0], r[1], r[2], r[3], if (pressed == key) Palette.ACCENT_DIM else color, dp(10f))
-        if (key != Control.PLAY && key != Control.EXPORT) {
-            outline(canvas, r[0], r[1], r[2], r[3], Palette.withAlpha(Palette.LINE, 120), dp(10f), dp(0.6f))
-        }
+        rect(canvas, r[0], r[1], r[2], r[3],
+            if (pressed == key) Palette.PANEL_HI else color, dp(10f))
     }
 
     private fun centeredLabel(canvas: Canvas, key: Control, text: String, color: Int, bold: Boolean = false) {

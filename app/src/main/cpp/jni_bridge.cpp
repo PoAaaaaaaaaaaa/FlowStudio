@@ -390,37 +390,84 @@ Java_com_volt_flowstudio_audio_NativeEngine_nativeClearSample(JNIEnv*, jobject, 
     if (e) e->clearSample();
 }
 
-// ---------------------------------------------------------------- 伴奏音频轨
+// ---------------------------------------------------------------- 音频片段
 
 JNIEXPORT void JNICALL
-Java_com_volt_flowstudio_audio_NativeEngine_nativeSetBackingTrack(
-        JNIEnv* env, jobject, jlong handle, jfloatArray data, jint frames,
-        jint sampleRate, jdouble startTick, jfloat gain) {
+Java_com_volt_flowstudio_audio_NativeEngine_nativeSetAudioBuffer(
+        JNIEnv* env, jobject, jlong handle, jint id, jfloatArray data, jint frames, jint sampleRate) {
     auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
     if (!e || !data) return;
     const jsize len = env->GetArrayLength(data);
     if (len < 2 || frames <= 0) return;
-    // Kotlin 侧传的是交织立体声，长度应为 frames*2；不信任就按实际长度截断。
-    const int usableFrames = std::min<int>((int)(len / 2), frames);
-    std::vector<jfloat> buf((size_t)usableFrames * 2);
+    // Kotlin 侧传交织立体声，长度应为 frames*2；不信任就按实际长度截断。
+    const int usable = std::min<int>((int)(len / 2), frames);
+    std::vector<jfloat> buf((size_t)usable * 2);
     env->GetFloatArrayRegion(data, 0, (jsize)buf.size(), buf.data());
-    e->setBackingTrack(buf.data(), usableFrames, sampleRate, startTick, gain);
-    LOGI("backing track: %d frames @ %d Hz, start %.0f ticks", usableFrames, sampleRate, startTick);
+    e->setAudioBuffer(id, buf.data(), usable, sampleRate);
+    LOGI("audio buffer %d: %d frames @ %d Hz", id, usable, sampleRate);
 }
 
 JNIEXPORT void JNICALL
-Java_com_volt_flowstudio_audio_NativeEngine_nativeClearBackingTrack(JNIEnv*, jobject, jlong handle) {
+Java_com_volt_flowstudio_audio_NativeEngine_nativeClearAudioBuffers(JNIEnv*, jobject, jlong handle) {
     auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
-    if (e) e->clearBackingTrack();
+    if (e) e->clearAudioBuffers();
 }
 
+// 片段布局：每段 6 个字段，按列拆成多个数组传，避免构造 Object 数组。
+// 只有布局会变（拖动、裁剪、改音量），素材不重复传输。
 JNIEXPORT void JNICALL
-Java_com_volt_flowstudio_audio_NativeEngine_nativeSetBackingGain(
-        JNIEnv*, jobject, jlong handle, jfloat gain, jboolean mute) {
+Java_com_volt_flowstudio_audio_NativeEngine_nativeSetAudioClips(
+        JNIEnv* env, jobject, jlong handle,
+        jintArray ids, jintArray tracks, jdoubleArray starts,
+        jlongArray offsets, jlongArray lengths, jfloatArray gains) {
     auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
     if (!e) return;
-    e->setBackingTrackGain(gain);
-    e->setBackingTrackMute(mute);
+    if (!ids || !tracks || !starts) { e->clearAudioClips(); return; }
+
+    const jsize n = env->GetArrayLength(ids);
+    if (n <= 0) { e->clearAudioClips(); return; }
+    if (env->GetArrayLength(tracks) < n || env->GetArrayLength(starts) < n) {
+        e->clearAudioClips();
+        return;
+    }
+
+    std::vector<jint> idBuf((size_t)n), trkBuf((size_t)n);
+    std::vector<jdouble> startBuf((size_t)n);
+    std::vector<jlong> offBuf((size_t)n, 0), lenBuf((size_t)n, 0);
+    std::vector<jfloat> gainBuf((size_t)n, 1.f);
+
+    env->GetIntArrayRegion(ids, 0, n, idBuf.data());
+    env->GetIntArrayRegion(tracks, 0, n, trkBuf.data());
+    env->GetDoubleArrayRegion(starts, 0, n, startBuf.data());
+    if (offsets && env->GetArrayLength(offsets) >= n) {
+        env->GetLongArrayRegion(offsets, 0, n, offBuf.data());
+    }
+    if (lengths && env->GetArrayLength(lengths) >= n) {
+        env->GetLongArrayRegion(lengths, 0, n, lenBuf.data());
+    }
+    if (gains && env->GetArrayLength(gains) >= n) {
+        env->GetFloatArrayRegion(gains, 0, n, gainBuf.data());
+    }
+
+    e->setAudioClipsById(
+        std::vector<int32_t>(idBuf.begin(), idBuf.end()),
+        std::vector<int32_t>(trkBuf.begin(), trkBuf.end()),
+        std::vector<double>(startBuf.begin(), startBuf.end()),
+        std::vector<int64_t>(offBuf.begin(), offBuf.end()),
+        std::vector<int64_t>(lenBuf.begin(), lenBuf.end()),
+        std::vector<float>(gainBuf.begin(), gainBuf.end()));
+}
+
+JNIEXPORT void JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeClearAudioClips(JNIEnv*, jobject, jlong handle) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    if (e) e->clearAudioClips();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_volt_flowstudio_audio_NativeEngine_nativeAudioClipCount(JNIEnv*, jobject, jlong handle) {
+    auto* e = reinterpret_cast<Engine*>((intptr_t)handle);
+    return e ? e->audioClipCount() : 0;
 }
 
 JNIEXPORT jboolean JNICALL

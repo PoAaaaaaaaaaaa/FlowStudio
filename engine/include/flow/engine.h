@@ -4,7 +4,9 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "flow/dsp.h"
@@ -150,16 +152,43 @@ public:
     void clearSample();
     bool hasSample() const { return sampleFrames_ > 0; }
 
-    // ---- 伴奏音频轨（backing track）----
-    // 与采样器不同：伴奏按"工程时间轴"线性播放，不跟随音高，
-    // 用来把一首完整伴奏/人声铺在编曲下面，实现"音乐 + 音频一起播"。
-    // 立体声交织数据，offset 是它在时间线上的起始 tick。
-    void setBackingTrack(const float* interleaved, int frames, int sampleRate,
-                         double startTick, float gain);
-    void clearBackingTrack();
-    bool hasBackingTrack() const { return std::atomic_load(&backingBuffer_) != nullptr; }
-    void setBackingTrackGain(float gain01) { backingGain_.store(gain01); }
-    void setBackingTrackMute(bool mute) { backingMute_.store(mute); }
+    // ---- 音频片段（audio clip）----
+    // 这是 FL 的核心语义：一段音频就是时间线上的一个块，摆在某条轨道上，
+    // 走那条轨道的音量、声像与插入效果 —— 与合成器的音符共用同一条混音路径。
+    // 以前这里是"一条全局伴奏轨"：只能铺一整首、且直接绕过轨道混音进母带。
+    // 现在任意轨道都能放任意多段音频，片段可裁可比、可重叠。
+    struct AudioBuffer {
+        std::vector<float> samples;   // 交织立体声
+        int frames = 0;
+        int sampleRate = 48000;
+    };
+    struct AudioClip {
+        std::shared_ptr<const AudioBuffer> buffer;
+        int track = 0;
+        double startTick = 0.0;     // 在时间线上的起始 tick
+        int64_t offsetFrames = 0;   // 从素材第几帧起播（左裁剪）
+        int64_t lengthFrames = 0;   // 播多少帧；<=0 表示播到素材末尾
+        float gain = 1.0f;
+    };
+
+    void setAudioClips(const std::vector<AudioClip>& clips);
+    void clearAudioClips();
+    bool hasAudioClips() const { return std::atomic_load(&audioClips_) != nullptr; }
+    int audioClipCount() const;
+
+    // 素材缓冲池：按 id 登记一次，之后改布局只传 id 表 ——
+    // 拖动一个片段不该把几十 MB 的波形重新跨 JNI 拷一遍。
+    void setAudioBuffer(int32_t id, const float* interleaved, int frames, int sampleRate);
+    void clearAudioBuffers();
+    bool hasAudioBuffer(int32_t id) const;
+
+    /** 按素材 id 装配片段表；素材已进池子，这里只搬布局，不搬波形。 */
+    void setAudioClipsById(const std::vector<int32_t>& bufferIds,
+                           const std::vector<int32_t>& tracks,
+                           const std::vector<double>& startTicks,
+                           const std::vector<int64_t>& offsetFrames,
+                           const std::vector<int64_t>& lengthFrames,
+                           const std::vector<float>& gains);
 
     // ---- 音频回调入口 ----
     // 直接写交织立体声，内部只用预分配缓冲，绝不 malloc —— 这是音频线程的硬要求。
@@ -184,6 +213,8 @@ private:
     double ticksPerSample() const;
     void resetVoices();
     void applyAutomation(int track, double tick, Channel& ch);
+    void renderAudioClip(const AudioClip& clip, float* busL, float* busR,
+                         int frames, double pos, double tps, float bpmNow);
 
     std::unique_ptr<AudioBackend> backend_;
     std::atomic<bool> audioRunning_{false};
@@ -240,18 +271,18 @@ private:
     int sampleRateRoot_ = 48000;
     int sampleRoot_ = 60;
 
-    // 伴奏轨：不可变快照。音频回调原子取得 shared_ptr，保证整块生命周期。
-    struct BackingBuffer {
-        std::vector<float> samples;  // 交织立体声
-        int frames = 0;
-        int sampleRate = 48000;
-        double startTick = 0.0;
-    };
-    std::shared_ptr<const BackingBuffer> backingBuffer_;
-    std::atomic<float> backingGain_{0.85f};
-    std::atomic<bool> backingMute_{false};
-    std::atomic<double> backingCursor_{0.0};
-    std::atomic<bool> backingSeek_{true};
+    // 音频片段：不可变快照。音频回调原子取得 shared_ptr，保证整块生命周期，
+    // 控制线程整体替换 —— 不加锁，也不会出现半新半旧的混音块。
+    std::shared_ptr<const std::vector<AudioClip>> audioClips_;
+
+    // 素材池。只在控制线程（JNI 调用）读写，音频线程从不碰这个 map，
+    // 它拿到的永远是 clip 里那份已经固定下来的 shared_ptr。
+    mutable std::mutex buffersMutex_;
+    std::map<int32_t, std::shared_ptr<const AudioBuffer>> audioBuffers_;
+
+    // 每块按轨道分桶后的指针表。容量在 prepare 时预留，回调里只 clear+push_back，
+    // 不触发堆分配 —— 音频线程上 malloc 一次就是一记爆音。
+    std::vector<const AudioClip*> audioBucket_[kMaxTracks];
 };
 
 }  // namespace flow

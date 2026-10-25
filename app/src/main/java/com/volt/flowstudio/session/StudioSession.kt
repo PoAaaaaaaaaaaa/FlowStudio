@@ -30,8 +30,11 @@ class StudioSession(private val context: Context) {
 
     val engine = NativeEngine.instance
 
-    /** 伴奏音频轨：与编曲一起播放，不参与音符调度。 */
-    val backing: BackingTrack by lazy { BackingTrack(context.applicationContext) }
+    /**
+     * 音频素材池。素材解码一次进引擎，片段只搬布局。
+     * 取代了早先的"一条全局伴奏轨"。
+     */
+    val audioStore: AudioStore by lazy { AudioStore(context.applicationContext) }
 
     /** 与外部工具（DSH 插件）通信的本地服务 */
     var bridge: StudioBridge? = null
@@ -51,8 +54,8 @@ class StudioSession(private val context: Context) {
     /** 外部（插件/桥接）改完工程后触发，让界面立即重绘，而不是等用户切页签。 */
     var onExternalEdit: ((String) -> Unit)? = null
 
-    /** 伴奏状态变化（导入/恢复/清除/调参）后触发，让界面刷新波形。 */
-    var onBackingChanged: (() -> Unit)? = null
+    /** 音频素材变化（导入/恢复/清除）后触发，让界面刷新波形。 */
+    var onAudioChanged: (() -> Unit)? = null
 
     /** 最近一次 AI 写入前的工程快照，供一键撤销。 */
     private var undoSnapshot: String? = null
@@ -102,7 +105,7 @@ class StudioSession(private val context: Context) {
             engine.prepare(48000, 256)
             reloadLastOrDefault()
             pushAll()
-            restoreBacking()
+            restoreAudio()
             engine.setMaster(
                 project.masterVolume / 100f,
                 project.masterLimiter,
@@ -156,6 +159,9 @@ class StudioSession(private val context: Context) {
         engine.setSchedule(project.buildSchedule(), project.lengthTicks())
         val (meta, ticks, vals) = project.buildAutomation()
         engine.setAutomation(meta, ticks, vals)
+        // 音频片段跟着一起装配：它是工程状态的一部分，
+        // 任何"整体推送"都必须包含它，否则加载工程后音频会静默消失。
+        audioStore.pushClips(project)
         engine.setLoop(project.loopOn, project.loopStart.toDouble(), project.loopEnd.toDouble())
         engine.setMaster(
             project.masterVolume / 100f, project.masterLimiter,
@@ -297,7 +303,7 @@ class StudioSession(private val context: Context) {
                     currentFile = file
                     stopPlayback()
                     pushAll()
-                    restoreBacking()
+                    restoreAudio()
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         .edit().putString(KEY_LAST, file.absolutePath).apply()
                     onLoaded?.invoke(proj)
@@ -327,9 +333,9 @@ class StudioSession(private val context: Context) {
                 stopPlayback()
                 project = incoming
                 currentFile = null
-                backing.reset()
+                audioStore.clear()
                 pushAll()
-                restoreBacking()
+                restoreAudio()
                 onLoaded?.invoke(project)
                 if (wasPlaying) play()
                 scheduleAutoSave()
@@ -382,54 +388,71 @@ class StudioSession(private val context: Context) {
         }
         currentFile = null
         unsavedKey = "unsaved-" + System.nanoTime().toString(16)
-        // 新工程不继承任何伴奏：reset 后不要再调用 restoreBacking，
-        // 否则同名文件会被重新加载，用户会以为"新建的工程还带着上一首"。
-        backing.reset()
+        // 新工程不继承任何音频素材：清空后不要再调用 restoreAudio，
+        // 否则旧素材会被重新装回来，用户会以为"新建的工程还带着上一首"。
+        audioStore.clear()
+        project.audioAssets.clear()
         pushAll()
         onLoaded?.invoke(project)
     }
 
-    /** 统一同步工程的伴奏文件与播放参数，防止界面、存档与引擎状态分裂。 */
-    fun restoreBacking() {
-        val p = project
-        backing.applySettings(p.backingStartTick, p.backingGain, p.backingMuted)
-        // 旧工程没有 backingFile 时不主动恢复同名残留，避免同名工程串音。
-        if (p.backingFile.isBlank()) {
-            backing.reset()
-            return
-        }
-        backing.restore(projectKey()) { ok ->
-            if (ok) main.post { onBackingChanged?.invoke() }
-        }
-    }
-
     /**
-     * 稳定的工程键：优先用工程文件，未保存时退回工程名。
-     * 不能直接用显示名，否则用户改一次名伴奏就丢失。
+     * 把工程里登记过的音频素材重新解码进引擎，再装配片段布局。
+     *
+     * 顺序不能反：片段引用素材 id，素材没进池子的话片段会被引擎丢弃，
+     * 表现为"工程里有片段但播放没声音"。
      */
-    private fun projectKey(): String =
-        currentFile?.nameWithoutExtension ?: unsavedKey
-
-    fun importBacking(src: File, onDone: ((Boolean, String) -> Unit)? = null) {
-        backing.import(projectKey(), src) { ok, message ->
-            if (ok) {
-                project.backingFile = backing.fileName
-                project.backingGain = backing.gain
-                project.backingStartTick = backing.startTick
-                scheduleAutoSave()
-            }
+    fun restoreAudio() {
+        audioStore.reload(project.audioAssets) {
             main.post {
-                if (ok) onBackingChanged?.invoke()
-                onDone?.invoke(ok, message)
+                audioStore.pushClips(project)
+                onAudioChanged?.invoke()
             }
         }
     }
 
-    fun clearBacking() {
-        backing.clear()
-        project.backingFile = ""
+    /** 导入一段音频成素材，并立刻摆到当前选中轨道的播放头位置。 */
+    fun importAudio(src: File, displayName: String,
+                    onDone: ((Boolean, String) -> Unit)? = null) {
+        val nextId = project.nextAudioId
+        project.nextAudioId = nextId + 1
+        audioStore.import(src, displayName, nextId) { asset ->
+            main.post {
+                if (asset == null) {
+                    // 导入失败要把号还回去，否则 id 会一直虚涨。
+                    if (project.nextAudioId == nextId + 1) project.nextAudioId = nextId
+                    onDone?.invoke(false, "无法解码这个音频：只支持 PCM WAV（16/24/32-bit 或 float）")
+                } else {
+                    project.audioAssets.add(asset)
+                    val track = project.selectedTrack.coerceIn(0, maxOf(0, project.tracks.size - 1))
+                    project.placeAudio(asset, track, positionTicks())
+                    scheduleAutoSave()
+                    onDone?.invoke(true, "${asset.name} · ${"%.1f".format(asset.durationSec)} 秒")
+                    onAudioChanged?.invoke()
+                }
+            }
+        }
+    }
+
+    /** 删除一个音频片段（不删素材，用户可能还在别处用它）。 */
+    fun removeClip(clipId: Int) {
+        project.clips.removeAll { it.id == clipId }
+        audioStore.pushClips(project)
         scheduleAutoSave()
-        onBackingChanged?.invoke()
+    }
+
+    /** 删掉一个素材，连带所有引用它的片段。 */
+    fun removeAudioAsset(assetId: Int) {
+        project.clips.removeAll { it.audioId == assetId }
+        project.audioAssets.removeAll { it.id == assetId }
+        audioStore.pushClips(project)
+        scheduleAutoSave()
+        onAudioChanged?.invoke()
+    }
+
+    /** 片段布局变了（拖动、裁剪、改音量）就重推一次。只搬布局，不搬波形。 */
+    fun pushAudioClips() {
+        audioStore.pushClips(project)
     }
 
     private fun reloadLastOrDefault() {

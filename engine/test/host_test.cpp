@@ -406,6 +406,162 @@ int main() {
         check(peak > 0.01f, msg);
     }
 
+    // ---------- 13. 音频片段：摆上轨道必须出声、可裁剪、走轨道混音 ----------
+    // 这一组是"音频片段化"改造的核心回归：
+    // 以前只有一条全局伴奏，绕过轨道混音；现在片段与音符共用同一路径，
+    // 所以必须验证三件事 —— 会响、裁剪生效、轨道推子能影响它。
+    {
+        Engine e;
+        e.prepare((float)SR, 256);
+        e.setBpm(120.f);
+        e.clearTracks();
+        Channel dry0 = makeChannel(Instrument::Synth, 0.9f);
+        dry0.sendReverb = 0.f;
+        dry0.sendDelay = 0.f;
+        e.setTrackConfig(0, dry0);
+
+        // 一段 1 秒的 440Hz 正弦，立体声交织。
+        const int clipFrames = SR;
+        std::vector<float> tone((size_t)clipFrames * 2);
+        for (int i = 0; i < clipFrames; i++) {
+            const float v = 0.5f * std::sin(2.0 * 3.14159265358979 * 440.0 * i / SR);
+            tone[(size_t)i * 2] = v;
+            tone[(size_t)i * 2 + 1] = v;
+        }
+        e.setAudioBuffer(7, tone.data(), clipFrames, SR);
+
+        // 空工程 + 只有一个音频片段：必须能出声，且不依赖任何 MIDI 事件。
+        Engine::AudioClip c;
+        c.track = 0;
+        c.startTick = 0;
+        c.offsetFrames = 0;
+        c.lengthFrames = 0;     // 播到素材末尾
+        c.gain = 1.f;
+        std::vector<int32_t> ids{7}, trks{0};
+        std::vector<double> starts{0.0};
+        std::vector<int64_t> offs{0}, lens{0};
+        std::vector<float> gains{1.f};
+        e.setAudioClipsById(ids, trks, starts, offs, lens, gains);
+        check(e.audioClipCount() == 1, "音频片段装配：count 应为 1");
+
+        e.play();
+        const int n = 512;
+        std::vector<float> buf((size_t)n * 2, 0.f);
+        float peak = 0.f;
+        for (int k = 0; k < 20; k++) {
+            e.renderInterleaved(buf.data(), n);
+            for (int i = 0; i < n * 2; i++) peak = std::max(peak, std::fabs(buf[(size_t)i]));
+        }
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "音频片段：有声 peak=%.3f", peak);
+        check(peak > 0.05f, msg);
+
+        // 轨道静音必须让它消失 —— 说明它确实走了轨道混音，而不是绕过。
+        //
+        // 用一个全新的 Engine 而不是复用 e：同一个实例里刚渲染过 0.2 秒的
+        // 音乐，混响/延迟总线上还有尾巴。复用就是在测尾巴衰减，不是测静音。
+        Engine em;
+        em.prepare((float)SR, 256);
+        em.setBpm(120.f);
+        em.clearTracks();
+        Channel muted = makeChannel(Instrument::Synth, 0.9f);
+        muted.mute = true;
+        muted.sendReverb = 0.f;
+        muted.sendDelay = 0.f;
+        em.setTrackConfig(0, muted);
+        em.setAudioBuffer(7, tone.data(), clipFrames, SR);
+        em.setAudioClipsById(ids, trks, starts, offs, lens, gains);
+        em.play();
+
+        float mutedPeak = 0.f;
+        for (int k = 0; k < 30; k++) {
+            em.renderInterleaved(buf.data(), n);
+            if (k < 6) continue;   // 跳过 12ms 增益平滑造成的斜坡
+            for (int i = 0; i < n * 2; i++) mutedPeak = std::max(mutedPeak, std::fabs(buf[(size_t)i]));
+        }
+        std::snprintf(msg, sizeof(msg), "音频片段：轨道静音后应静音 peak=%.4f", mutedPeak);
+        check(mutedPeak < 0.02f, msg);
+
+        // 裁掉头部：从第 0.5 秒开始取，前几块应该还是静音。
+        Engine e2;
+        e2.prepare((float)SR, 256);
+        e2.setBpm(120.f);
+        e2.clearTracks();
+        Channel dry = makeChannel(Instrument::Synth, 0.9f);
+        dry.sendReverb = 0.f;
+        dry.sendDelay = 0.f;
+        e2.setTrackConfig(0, dry);
+        e2.setAudioBuffer(7, tone.data(), clipFrames, SR);
+        // 注意：必须用 setAudioClipsById —— 它按 id 从素材池取 buffer。
+        // 直接构造 AudioClip 的话 buffer 是空的，引擎会按"无素材"整段丢掉。
+        e2.setAudioClipsById(ids, trks, starts,
+                             std::vector<int64_t>{SR / 2},   // 从素材中点起播
+                             std::vector<int64_t>{0},
+                             std::vector<float>{1.f});
+        e2.play();
+
+        // 正弦在 0.5s 处接近零点，所以只看"有没有能量"而不是首帧幅度。
+        float cutPeak = 0.f;
+        for (int k = 0; k < 8; k++) {
+            e2.renderInterleaved(buf.data(), n);
+            for (int i = 0; i < n * 2; i++) cutPeak = std::max(cutPeak, std::fabs(buf[(size_t)i]));
+        }
+        std::snprintf(msg, sizeof(msg), "音频片段裁剪：仍有声 peak=%.3f", cutPeak);
+        check(cutPeak > 0.05f, msg);
+
+        // 清除必须彻底静音，且不留引用。
+        // 同样换新实例：e2 刚播过 0.11 秒，同一实例的母线里还有残余。
+        Engine ec;
+        ec.prepare((float)SR, 256);
+        ec.setBpm(120.f);
+        ec.clearTracks();
+        Channel dryc = makeChannel(Instrument::Synth, 0.9f);
+        dryc.sendReverb = 0.f;
+        dryc.sendDelay = 0.f;
+        ec.setTrackConfig(0, dryc);
+        ec.setAudioBuffer(7, tone.data(), clipFrames, SR);
+        ec.setAudioClipsById(ids, trks, starts, offs, lens, gains);
+        ec.clearAudioClips();
+        check(ec.audioClipCount() == 0, "clearAudioClips 后 count 应为 0");
+        ec.play();
+        float afterClear = 0.f;
+        for (int k = 0; k < 8; k++) {
+            ec.renderInterleaved(buf.data(), n);
+            for (int i = 0; i < n * 2; i++) afterClear = std::max(afterClear, std::fabs(buf[(size_t)i]));
+        }
+        std::snprintf(msg, sizeof(msg), "清除片段后应静音 peak=%.4f", afterClear);
+        check(afterClear < 0.02f, msg);
+
+        // 反复替换片段（拖动场景）：不应崩溃、不应残留旧片段。
+        Engine e3;
+        e3.prepare((float)SR, 256);
+        e3.setBpm(120.f);
+        e3.clearTracks();
+        Channel dry3 = makeChannel(Instrument::Synth, 0.9f);
+        dry3.sendReverb = 0.f;
+        dry3.sendDelay = 0.f;
+        e3.setTrackConfig(0, dry3);
+        e3.setAudioBuffer(7, tone.data(), clipFrames, SR);
+        for (int round = 0; round < 200; round++) {
+            // 起点必须落在渲染窗口内：只渲 40 块 ≈ 0.43 秒，
+            // 把片段摆到 3.5 秒处再断言"有声"是自相矛盾的。
+            e3.setAudioClipsById(ids, trks,
+                                 std::vector<double>{(double)(round % 4) * 64.0},
+                                 std::vector<int64_t>{0},
+                                 std::vector<int64_t>{0},
+                                 std::vector<float>{1.f});
+        }
+        check(e3.audioClipCount() == 1, "反复替换后仍应只有 1 个片段");
+        e3.play();
+        float replacePeak = 0.f;
+        for (int k = 0; k < 40; k++) {
+            e3.renderInterleaved(buf.data(), n);
+            for (int i = 0; i < n * 2; i++) replacePeak = std::max(replacePeak, std::fabs(buf[(size_t)i]));
+        }
+        std::snprintf(msg, sizeof(msg), "反复替换片段后仍然有声 peak=%.3f", replacePeak);
+        check(replacePeak > 0.05f, msg);
+    }
+
     std::printf("\n%s  失败 %d 项\n", gFail == 0 ? "全部通过" : "有失败", gFail);
     return gFail == 0 ? 0 : 1;
 }

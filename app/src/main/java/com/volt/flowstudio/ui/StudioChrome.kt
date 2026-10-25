@@ -23,10 +23,12 @@ class StudioBackground @JvmOverloads constructor(
     private var shader: LinearGradient? = null
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        // 从左上到右下的极缓渐变：让大面积暗色有个光源方向，
+        // 不至于像一块死板的纯色板。幅度只有 3-4 个色阶，几乎察觉不到。
         shader = LinearGradient(
             0f, 0f, w.toFloat(), h.toFloat(),
-            intArrayOf(0xFF171D28.toInt(), Palette.BG, 0xFF10131B.toInt()),
-            floatArrayOf(0f, 0.52f, 1f), Shader.TileMode.CLAMP
+            intArrayOf(0xFF12151A.toInt(), Palette.BG, 0xFF0A0C0F.toInt()),
+            floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP
         )
     }
 
@@ -36,10 +38,10 @@ class StudioBackground @JvmOverloads constructor(
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), b.fill)
         b.fill.shader = null
         // 极淡的网格：给大面积暗色一点"工作台"的质感，不抢内容。
-        val step = dp(28f)
+        val step = dp(32f)
         if (step <= 0f) return
-        b.stroke.color = Palette.withAlpha(Palette.LINE, 16)
-        b.stroke.strokeWidth = dp(0.6f)
+        b.stroke.color = Palette.withAlpha(Palette.LINE, 12)
+        b.stroke.strokeWidth = dp(0.5f)
         var x = 0f
         while (x < width) {
             canvas.drawLine(x, 0f, x, height.toFloat(), b.stroke)
@@ -119,27 +121,29 @@ class EditorToolbar @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
         rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
-        line(canvas, 0f, h - 0.5f, w, h - 0.5f, Palette.withAlpha(Palette.LINE, 120), dp(0.8f))
-        rect(canvas, dp(10f), dp(9f), dp(12.5f), h - dp(9f), Palette.ACCENT, dp(1.5f))
         val compact = w < dp(500f)
-        val titleWidth = if (compact) dp(86f) else dp(142f)
-        label(canvas, clipText(title, titleWidth - dp(20f), sp(12f), true),
-            dp(22f), if (compact) h * 0.62f else dp(15f), Palette.TEXT, sp(12f), bold = true)
+        val titleWidth = if (compact) dp(84f) else dp(138f)
+        label(canvas, clipText(title, titleWidth - dp(16f), sp(11.5f), true),
+            dp(12f), if (compact) h * 0.63f else dp(15f), Palette.TEXT, sp(11.5f), bold = true)
         if (!compact) {
-            label(canvas, clipText(subtitle, titleWidth - dp(20f), sp(8f)),
-                dp(22f), h - dp(6f), Palette.TEXT_FAINT, sp(8f))
+            label(canvas, clipText(subtitle, titleWidth - dp(16f), sp(8f)),
+                dp(12f), h - dp(6f), Palette.TEXT_FAINT, sp(8f))
         }
         actionsLeft = titleWidth
-        actionWidth = if (actions.isEmpty()) 0f else (w - titleWidth - dp(6f)) / actions.size
+        actionWidth = if (actions.isEmpty()) 0f else (w - titleWidth - dp(8f)) / actions.size
         actions.forEachIndexed { index, action ->
             val left = actionsLeft + index * actionWidth + dp(2f)
             val right = actionsLeft + (index + 1) * actionWidth - dp(2f)
-            rect(canvas, left, dp(5f), right, h - dp(5f),
-                if (pressed == index) Palette.ACCENT_DIM else Palette.PANEL_HI, dp(7f))
-            label(canvas, clipText(action.first, right - left - dp(6f), sp(9.5f)),
-                (left + right) / 2f, h / 2f + sp(3.5f),
-                if (pressed == index) Palette.TEXT else Palette.TEXT_DIM, sp(9.5f), center = true)
+            // 动作按钮做成"沉在背景里"的胶囊：只有按下时才浮起来。
+            // 常态下不要有可见描边，否则顶栏会变成一排方块的阵列。
+            val active = pressed == index
+            rect(canvas, left, dp(6f), right, h - dp(6f),
+                if (active) Palette.PANEL_HI else Palette.withAlpha(Palette.PANEL, 150), dp(6f))
+            label(canvas, clipText(action.first, right - left - dp(6f), sp(9f)),
+                (left + right) / 2f, h / 2f + sp(3.2f),
+                if (active) Palette.TEXT else Palette.TEXT_DIM, sp(9f), center = true)
         }
+        // 底边只留一条极暗的线：工具栏与内容的分界靠明度，不靠线。
         line(canvas, 0f, h - 0.5f, w, h - 0.5f, Palette.LINE_SOFT, dp(1f))
     }
 
