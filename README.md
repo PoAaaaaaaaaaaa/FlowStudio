@@ -14,6 +14,16 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.15 更新
+
+- 播放/暂停、停止、后退、快进移到底部拇指区；顶部只留页签与工程信息。
+- 新增后退/快进：轻点跳一拍，长按连续跳小节（桥接新增 `/transport/nudge`）。
+- `/transport/seek` 同时接受 query 与 JSON body，并广播 transport 事件。
+- 插件新增 `flowstudio_dj`：过渡方案、搓碟手法、延迟时值、混音链路与频段分工。
+- 过渡方案 5 种（硬切/换低音/滤波扫频/延迟淡出/倒转），含小节安排与滤波自动化。
+- 搓碟 5 种手法（baby/chirp/flare/transformer/tear）可直接转成采样器音符。
+- 底栏改为浮起圆角卡片，播放时有移动光带；页签选中态换成滑动指示条。
+
 ## 1.14 更新
 
 - 新增本地桥接协议 v2：`/capabilities` 让插件按实际能力调用，不再按版本号猜。

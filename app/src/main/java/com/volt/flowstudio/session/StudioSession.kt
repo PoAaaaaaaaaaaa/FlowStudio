@@ -211,9 +211,10 @@ class StudioSession(private val context: Context) {
     fun seek(ticks: Int) {
         if (!engine.available) return
         val len = project.lengthTicks()
-        engine.setPosition(ticks.coerceIn(0, len).toDouble())
+        val target = ticks.coerceIn(0, len)
+        engine.setPosition(target.toDouble())
         runCatching {
-            bridge?.broadcast("seek", org.json.JSONObject().put("positionTicks", ticks))
+            bridge?.broadcast("seek", org.json.JSONObject().put("positionTicks", target))
         }
     }
 

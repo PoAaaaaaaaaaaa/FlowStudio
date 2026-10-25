@@ -79,21 +79,22 @@ class MainActivity : Activity() {
     private fun buildUi() {
         val root = FrameLayout(this).apply { setBackgroundColor(Palette.BG) }
         val portrait = resources.displayMetrics.widthPixels < dp(600)
-        chromeTop = dp(if (portrait) 120 else 116)
-        chromeBottom = dp(32)
+        // 顶栏只放页签；播放/停止/快进/后退在底部拇指区。
+        chromeTop = dp(if (portrait) 88 else 84)
+        chromeBottom = dp(76)
         root.addView(StudioBackground(this), matchParams())
 
-        transportBar = TransportBar(this)
+        transportBar = TransportBar(this).apply { bottomMode = true }
         root.addView(transportBar, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(44)
-        ).apply { gravity = android.view.Gravity.TOP })
+            FrameLayout.LayoutParams.MATCH_PARENT, dp(60)
+        ).apply { gravity = android.view.Gravity.BOTTOM; bottomMargin = dp(34) })
 
         tabBar = TabBar(this).apply {
             tabs = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
         }
         root.addView(tabBar, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(30)
-        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(44) })
+            FrameLayout.LayoutParams.MATCH_PARENT, dp(44)
+        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(20) })
 
         // 诊断条：启动有问题时显示，正常时完全隐藏
         banner = TextView(this).apply {
@@ -106,7 +107,7 @@ class MainActivity : Activity() {
         }
         root.addView(banner, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(76) })
+        ).apply { gravity = android.view.Gravity.TOP; topMargin = dp(66) })
 
         content = FrameLayout(this)
         root.addView(content, FrameLayout.LayoutParams(
@@ -170,16 +171,16 @@ class MainActivity : Activity() {
         content.addView(autoHolder, matchParams())
 
         FlowButton(this).apply {
-            text = "手势与操作指南  ·  FlowStudio 1.13"
-            textSize = 9.5f
-            minHeight = chromeBottom
-            minimumHeight = chromeBottom
+            text = "手势与操作指南  ·  FlowStudio 1.15"
+            textSize = 9f
+            minHeight = dp(28)
+            minimumHeight = dp(28)
             setPadding(dp(12), 0, dp(12), 0)
             buttonColor = Palette.SURFACE
             foregroundColor = Palette.TEXT_FAINT
             setOnClickListener { showGestureGuide() }
             root.addView(this, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, chromeBottom
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(28)
             ).apply { gravity = android.view.Gravity.BOTTOM })
         }
         setContentView(root)
@@ -248,6 +249,16 @@ class MainActivity : Activity() {
         transportBar.onStop = {
             session.stop()
             transportBar.setPlaying(false)
+            refreshPlayhead()
+        }
+        // 后退/快进：轻点一拍，长按连续一小节；夹在工程长度内。
+        transportBar.barTicks = session.project.barTicks
+        transportBar.onSeekRelative = { delta ->
+            val p = session.project
+            val len = p.lengthTicks()
+            val target = (session.positionTicks() + delta).coerceIn(0, len)
+            session.seek(target)
+            transportBar.positionTicks = target
             refreshPlayhead()
         }
         transportBar.onBpmChange = { bpm ->
@@ -511,6 +522,7 @@ class MainActivity : Activity() {
         if (!session.engine.available) return
         val pos = session.positionTicks()
         transportBar.positionTicks = pos
+        transportBar.barTicks = session.project.barTicks
         transportBar.bpm = session.project.bpm
         transportBar.setPlaying(session.isPlaying())
         when (currentTab) {
@@ -629,7 +641,15 @@ class MainActivity : Activity() {
     }
 
     private fun showMoreDialog() {
-        val items = arrayOf("保存工程", "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}", "摇摆 / Swing", "按曲风起步…", "操作指南", "撤销 AI 最近一次编辑")
+        val items = arrayOf(
+            "保存工程",
+            "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
+            "摇摆 / Swing",
+            "按曲风起步…",
+            "DJ 与混音知识",
+            "操作指南",
+            "撤销 AI 最近一次编辑"
+        )
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("更多控制")
             .setItems(items) { _, which ->
@@ -638,8 +658,9 @@ class MainActivity : Activity() {
                     1 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
                     2 -> showSwingDialog()
                     3 -> showGenrePicker()
-                    4 -> showGestureGuide()
-                    5 -> {
+                    4 -> showDjKnowledge()
+                    5 -> showGestureGuide()
+                    6 -> {
                         val ok = session.undoExternalEdit()
                         toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
                         refreshAll(session.project)
@@ -647,6 +668,34 @@ class MainActivity : Activity() {
                 }
             }
             .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    /** 手机端也能查的 DJ / 混音要点；与插件 flowstudio_dj 同源知识。 */
+    private fun showDjKnowledge() {
+        val text =
+            "过渡（从第 9 小节交接）\n" +
+            "· 硬切：同调同鼓型时最干净，前段收尾后段正拍进\n" +
+            "· 换低音：重叠 4 小节，先撤前段贝斯再让后段底鼓进\n" +
+            "· 滤波扫频：后段低通压到 400Hz 提前 4 小节进，逐小节打开\n" +
+            "· 延迟淡出：1/4 延迟 + 大反馈，干声先收\n" +
+            "· 倒转：段末一拍拍速下滑，留一小节空白再落\n\n" +
+            "搓碟（采样器轨，1 小节）\n" +
+            "· Baby Scratch：0/-2 半音来回，最基础\n" +
+            "· Chirp：推音开推子、回拉关推子\n" +
+            "· Flare：推子快速开合，密集断奏\n\n" +
+            "混音顺序\n" +
+            "  滤波 → 均衡 → 压缩 → 饱和\n" +
+            "频段只留一个主角：20–60Hz 给底鼓/808，60–200Hz 给贝斯。\n\n" +
+            "常见处方\n" +
+            "· 浑浊：铺底 200–400Hz 减 2–3dB\n" +
+            "· 鼓没冲击：底鼓与贝斯错开 1 个 16 分\n" +
+            "· 主奏被埋：其他轨在该频段轻挖 1.5dB\n\n" +
+            "旋转类效果（合唱/移相/失谐）不要加在低频轨上。"
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("DJ 与混音知识")
+            .setMessage(text)
+            .setPositiveButton("知道了", null)
             .show()
     }
 
@@ -660,6 +709,8 @@ class MainActivity : Activity() {
                 "编排：拖片段移动或跨轨，拖右缘改长度；在标尺上横向划出循环。\n\n" +
                 "旋钮：上下或左右拖动，长按进入精调，双击复位，双指拖动也可精调。\n\n" +
                 "速度：上下拖动 BPM，轻点数字精确输入。\n\n" +
+                "底部控制条：播放/暂停、停止、后退、快进都在这里。\n" +
+                "  快进后退轻点跳一拍，长按连续跳小节。\n\n" +
                 "工程在编辑后自动保存，切到后台也会保存。"
             )
             .setPositiveButton("开始创作", null)

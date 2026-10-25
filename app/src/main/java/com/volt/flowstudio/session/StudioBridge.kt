@@ -483,9 +483,32 @@ class StudioBridge(
                     200 to t
                 }
                 method == "POST" && path == "/transport/seek" -> {
-                    val tick = query["tick"]?.toIntOrNull() ?: 0
+                    val bodyTick = runCatching { JSONObject(body).optInt("tick", Int.MIN_VALUE) }
+                        .getOrDefault(Int.MIN_VALUE)
+                    // 兼容 query 与 body；body 优先，方便插件带 JSON 提交。
+                    val tick = if (bodyTick != Int.MIN_VALUE) bodyTick
+                    else query["tick"]?.toIntOrNull() ?: 0
                     runOnMain { session.seek(tick) }
-                    200 to (onMainThread { transportJson() } ?: transportJson())
+                    val t = onMainThread { transportJson() } ?: transportJson()
+                    broadcast("transport", t)
+                    session.notifyExternalEdit("AI 跳转播放位置")
+                    200 to t
+                }
+                // 相对跳转：AI 说"快进 4 小节"比算绝对 tick 更不容易错。
+                method == "POST" && path == "/transport/nudge" -> {
+                    val bars = runCatching { JSONObject(body).optInt("bars", 0) }.getOrDefault(0)
+                    val beats = runCatching { JSONObject(body).optInt("beats", 0) }.getOrDefault(0)
+                    val delta = bars * session.project.barTicks + beats * Note.PPQ
+                    if (delta == 0) return 400 to JSONObject().put("error", "bars 或 beats 至少给一个")
+                    val target = onMainThread {
+                        val t = (session.positionTicks() + delta)
+                            .coerceIn(0, session.project.lengthTicks())
+                        session.seek(t)
+                        transportJson()
+                    } ?: return 503 to JSONObject().put("error", "应用繁忙")
+                    broadcast("transport", target)
+                    session.notifyExternalEdit("AI 跳转播放位置")
+                    200 to target
                 }
                 method == "POST" && path == "/bpm" -> {
                     val v = query["value"]?.toFloatOrNull()
