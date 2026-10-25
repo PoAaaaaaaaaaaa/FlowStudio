@@ -153,13 +153,9 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // 每次回到前台重同步一次令牌镜像。
-        //
-        // 为什么 boot 之外还要做：有些系统的共享存储挂载/授权晚于 Application onCreate，
-        // 那时写的镜像会失败或写到旧路径；用户看到的是"App 明明在跑，插件一直 401"。
-        // 回前台时存储一定就绪，这里补一次，几毫秒的开销。
-        // mirrorStatus 是幂等覆盖写，重复调用无害。
-        runCatching { session.bridge?.syncMirrors() }
+        // 回前台刷新端口发现文件：App 若换了端口（重启后 8199 被占），
+        // 插件读这份文件就能跟上。
+        runCatching { session.bridge?.writeBridgeInfo() }
     }
 
     override fun onPause() {

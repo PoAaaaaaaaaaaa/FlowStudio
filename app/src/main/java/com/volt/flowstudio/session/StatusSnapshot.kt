@@ -272,13 +272,6 @@ class StatusSnapshot(
                 put(check("bridge", s.bridge?.running == true,
                     if (s.bridge?.running == true) "端口 ${s.bridge?.port}"
                     else "桥接没起来（插件连不上）"))
-                // 令牌镜像：插件能不能拿到令牌就靠这些文件。
-                // 以前镜像失败是静默的，用户只剩一句 401 无从下手。
-                put(check("tokenMirrors",
-                    (s.bridge?.mirrorStatus?.isEmpty() != true) &&
-                        s.bridge?.mirrorStatus?.any { it.startsWith("ok:") } == true,
-                    s.bridge?.mirrorStatus?.joinToString("; ")?.take(400)
-                        ?: "桥接未启动，尚未同步"))
                 put(check("exportDir",
                     runCatching { File(s.exportDirHint()).canWrite() }.getOrDefault(false) ||
                         s.exportDirHint().startsWith("Music"),

@@ -21,7 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 为什么是 HTTP + 回环：
  *   - 不用 adb、不用 root，插件在容器里直接 curl 127.0.0.1 就能通；
  *   - 只绑回环地址，局域网里的其他设备连不上；
- *   - 每次请求校验 token，防止本机其它应用乱改用户的工程。
+ *
+ * 安全模型（1.27 起，直接免鉴权）：
+ *   只绑 127.0.0.1 —— 能连上回环的进程只有本 App 和容器里的工具进程
+ *   （DSHA 环境）。Android 的网络隔离本来就禁止其它 App 访问本机回环。
+ *   令牌体系（生成/镜像/候选比对）在 1.25-1.26 造成的故障比它防的多：
+ *   镜像写失败 → 插件永远 401 → 无从排查。现在整层删除。
  *
  * 协议很小，全是 JSON：
  *   GET  /state              当前工程全量状态（含传输、轨道、样式、片段）
@@ -48,7 +53,6 @@ class StudioBridge(
     companion object {
         private const val TAG = "FlowBridge"
         const val DEFAULT_PORT = 8199
-        private const val TOKEN_FILE = "bridge_token"
     }
 
     @Volatile
@@ -158,113 +162,28 @@ class StudioBridge(
     }
 
     /**
-     * 访问令牌。首次启动生成，之后一直复用 —— 令牌必须稳定，
-     * 插件拿着旧值重连是常态；每次启动换新值等于把所有外部工具踢下线。
-     *
-     * 这里只做两件事：读私有文件，没有就生成并写回。
-     * 镜像同步是独立函数 [syncMirrors]，失败单独记录、单独暴露，
-     * 不会连累令牌本身 —— 以前镜像段整个被一个大 runCatching 包着，
-     * 任何一步抛异常都静默跳过，表现就是"桥接在跑、镜像全没了、
-     * 插件永远 401"，而且日志里一行线索都没有。
+     * bridge.json：一份文件带端口与版本，插件读它直连（端口发现用）。
+     * 1.27 起免鉴权，文件里不再放令牌。
      */
-    val token: String by lazy {
-        val primary = File(context.filesDir, TOKEN_FILE)
-        val existing = runCatching { primary.readText().trim() }.getOrNull()
-            ?.takeIf { it.length >= 16 }
-        existing ?: generateToken(primary)
-    }
-
-    /** 每个镜像位置的同步结果，诊断接口直接可读。 */
-    @Volatile
-    var mirrorStatus: List<String> = emptyList()
-        private set
-
-    /**
-     * 把令牌同步到外部工具够得着的位置。
-     *
-     * 每个目标独立 try-catch：一个失败不影响其它，失败原因留在
-     * [mirrorStatus] 里，/status/health 能看到 —— 镜像没写出来
-     * 必须是"可诊断的"，不能只剩一句连不上。
-     *
-     * 目标（按可靠度排序）：
-     *   1. App 外部私有目录 —— 同一 App 的私有存储，一定可写，
-     *      但 Android 11+ 容器端可能读不到（Android/data 受限）
-     *   2. Music/FlowStudio/bridge_token —— 公共目录，容器可读；
-     *      1.25 实测某些机型这段写入失败，所以不能只靠它
-     *   3. Download/.flowstudio_token —— Download 一定可写，
-     *      文件管理器不隐藏；点号开头不进媒体扫描
-     *   4. Music/FlowStudio/bridge.json —— 端口+令牌+版本一份文件，
-     *      插件的快路径
-     */
-    fun syncMirrors() {
-        val t = token
-        val status = mutableListOf<String>()
-
-        // 1. 外部私有目录
+    fun writeBridgeInfo() {
         runCatching {
-            context.getExternalFilesDir(null)?.let { dir ->
-                val f = File(dir, TOKEN_FILE)
-                f.parentFile?.mkdirs()
-                if (f.readText().trim() != t) f.writeText(t)
-                status.add("ok: ${f.absolutePath}")
-            }
-        }.onFailure { status.add("fail(external-private): ${it.message}") }
-
-        // 2 + 4. 公共 Music 目录（bridge_token 与 bridge.json）
-        val musicDir = runCatching {
-            File(
+            val info = File(
                 android.os.Environment.getExternalStoragePublicDirectory(
                     android.os.Environment.DIRECTORY_MUSIC
                 ),
-                "FlowStudio"
+                "FlowStudio/bridge.json"
             )
-        }.getOrNull()
-        if (musicDir == null) {
-            status.add("fail(music): getExternalStoragePublicDirectory 返回 null")
-        } else {
-            runCatching {
-                musicDir.mkdirs()
-                val f = File(musicDir, TOKEN_FILE)
-                if (f.readText().trim() != t) f.writeText(t)
-                status.add("ok: ${f.absolutePath}")
-            }.onFailure { status.add("fail(music-token): ${it.message}") }
-
-            runCatching {
-                val info = File(musicDir, "bridge.json")
-                info.writeText("""{"app":"FlowStudio","port":$port,"token":"$t","protocol":2,"version":"${session.versionName()}"}""")
-                status.add("ok: ${info.absolutePath}")
-            }.onFailure { status.add("fail(bridge.json): ${it.message}") }
-        }
-
-        // 3. Download 兜底：Music 不可写时它往往仍可写
-        runCatching {
-            val dl = android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOWNLOADS
-            )
-            val f = File(dl, ".flowstudio_token")
-            if (f.readText().trim() != t) f.writeText(t)
-            status.add("ok: ${f.absolutePath}")
-        }.onFailure { status.add("fail(download): ${it.message}") }
-
-        mirrorStatus = status
-        status.forEach { android.util.Log.i(TAG, "镜像: $it") }
-    }
-
-    private fun generateToken(f: File): String {
-        val bytes = ByteArray(24)
-        java.security.SecureRandom().nextBytes(bytes)
-        val t = bytes.joinToString("") { "%02x".format(it) }
-        runCatching { f.writeText(t) }
-        return t
+            info.parentFile?.mkdirs()
+            info.writeText("""{"app":"FlowStudio","port":$port,"protocol":2,"version":"${session.versionName()}"}""")
+        }.onFailure { android.util.Log.w(TAG, "bridge.json 写入失败: ${it.message}") }
     }
 
     fun start(preferredPort: Int = DEFAULT_PORT): Boolean {
         if (running) return true
         stop.set(false)
 
-        // 令牌生成 + 镜像同步。镜像失败只记状态，不连累桥接启动。
-        runCatching { syncMirrors() }
-            .onFailure { Log.e(TAG, "镜像同步异常", it) }
+        // 端口发现文件：插件读它直连，不用猜端口。
+        runCatching { writeBridgeInfo() }
         var bound: ServerSocket? = null
         var p = preferredPort
         // 端口被占就往后找，最多试 10 个
@@ -346,7 +265,6 @@ class StudioBridge(
             val pathWithQuery = parts[1]
 
             var contentLength = 0
-            var authHeader: String? = null
             var tooLarge = false
             while (true) {
                 val line = input.readLine() ?: break
@@ -360,7 +278,6 @@ class StudioBridge(
                         // 上限 64 MB：足够 5 分钟 44.1kHz 双声道 WAV，也挡住内存炸弹。
                         if (contentLength > 64 * 1024 * 1024) tooLarge = true
                     }
-                    if (k == "authorization") authHeader = v
                 }
             }
 
@@ -381,7 +298,7 @@ class StudioBridge(
             } else ""
 
             val out = client.getOutputStream()
-            val (status, payload) = route(method, pathWithQuery, body, authHeader)
+            val (status, payload) = route(method, pathWithQuery, body)
 
             if (status == -1) {
                 // ---- SSE ----
@@ -446,18 +363,14 @@ class StudioBridge(
     private fun route(
         method: String,
         pathWithQuery: String,
-        body: String,
-        auth: String?
+        body: String
     ): Pair<Int, JSONObject> {
         val qIdx = pathWithQuery.indexOf('?')
         val path = if (qIdx >= 0) pathWithQuery.substring(0, qIdx) else pathWithQuery
         val query = if (qIdx >= 0) parseQuery(pathWithQuery.substring(qIdx + 1)) else emptyMap()
 
-        // 探活与只读概览不需要令牌。
-        //
-        // /status 只暴露"引擎在不在、音频流起没起、工程多长"这类不敏感数字，
-        // 拿到它也无法修改任何东西。让插件能先确认"连得上、版本对、有没有声音"，
-        // 再去要令牌做写操作 —— 否则第一次连不上时用户看到的就是"全都不行"。
+        // 整个桥接免鉴权（安全模型见类头注释）。/status 在这里是因为
+        // 它是插件的第一站：先确认"连得上、版本对、有没有声音"。
         if (path == "/status" && method == "GET") {
             return 200 to snapshot.summary()
         }
@@ -467,10 +380,6 @@ class StudioBridge(
                 .put("ok", true)
                 .put("app", "FlowStudio")
                 .put("version", session.versionName())
-        }
-
-        if (!checkAuth(auth)) {
-            return 401 to JSONObject().put("error", "缺少或错误的 Authorization")
         }
 
         // SSE 长连接要单独处理：它不能走上面的"返回 JSON 立即结束"流程
@@ -793,16 +702,6 @@ class StudioBridge(
     /** 不需要返回值的版本 */
     private fun runOnMain(timeoutMs: Long = 6000, block: () -> Unit): Boolean =
         onMainThread(timeoutMs) { block(); true } ?: false
-
-    private fun checkAuth(header: String?): Boolean {
-        if (header == null) return false
-        val provided = header.removePrefix("Bearer ").removePrefix("bearer ").trim()
-        if (provided.length != token.length) return false
-        // 定长比较，别用 == 泄露长度信息
-        var diff = 0
-        for (i in provided.indices) diff = diff or (provided[i].code xor token[i].code)
-        return diff == 0
-    }
 
     private fun parseQuery(q: String): Map<String, String> =
         q.split('&').mapNotNull {

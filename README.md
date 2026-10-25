@@ -14,6 +14,20 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.27 更新
+
+- **桥接免鉴权（应要求，整层删除令牌体系）**：只绑 127.0.0.1 —— 能连上回环的
+  进程只有本 App 和容器里的工具进程，Android 网络隔离本来就禁止其它 App
+  访问本机回环。令牌体系（生成/镜像/候选比对/401）在 1.25-1.26 造成的故障
+  比它防的多：镜像写失败 → 插件永远 401 → 无从排查。现在：
+  - 删 token 生成、6 路径镜像、X-TC 候选、401 分支
+  - bridge.json 只含端口与版本（端口发现用）
+  - 插件删 readToken/tokenCandidates 与全部 Authorization 头
+  - 连接变成"读 bridge.json 拿端口 → ping → 直连"，零配置
+- 插件新增 `flowstudio_projects`：列出存档 / 打开工程 / 查看投递积压 ——
+  这三个客户端方法一直存在，但没有任何工具暴露，AI 之前调不到。
+- 客户端补 `inbox` / `drainInbox` 两个方法。
+
 ## 1.26 更新
 
 - **修令牌镜像静默失败（401 的根因）**：令牌的镜像同步原来整体包在一个
