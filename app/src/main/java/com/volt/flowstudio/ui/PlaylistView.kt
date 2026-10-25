@@ -78,8 +78,23 @@ class PlaylistView @JvmOverloads constructor(
     private var panY = 0f
     private var loopAnchor = 0
 
-    private val scanCache = HashMap<Int, FloatArray>()
-    private var scanCacheKey = 0
+    /**
+     * 音符片段的包络缓存。
+     *
+     * 用 (片段 id, 像素列数, 起点, 长度) 组成复合 key —— 以前是
+     * `clip.id * 31 xor cols`，这个表达式会把 id 和列数混在一起：
+     * 片段 1 宽 97 列和片段 2 宽 64 列会算出同一个 key（126），
+     * 于是拿到的数组是别的长度，循环写越界直接崩。
+     *
+     * 光换 key 还不够：片段被拖动后列数不变但内容该重算，
+     * 所以起点和长度也进 key。数组本身再带长度断言兜底 ——
+     * onDraw 里崩一次就是闪退，不能赌 key 一定唯一。
+     */
+    private data class EnvelopeKey(
+        val clipId: Int, val cols: Int, val start: Int, val length: Int, val offset: Int
+    )
+    private val scanCache = HashMap<EnvelopeKey, FloatArray>()
+    private var scanCacheBarWidth = -1f
 
     // ---------------------------------------------------------------- 几何
 
@@ -251,7 +266,11 @@ class PlaylistView @JvmOverloads constructor(
     /** 所有片段。音频与音符共用外框与把手，内容各自画。 */
     private fun drawClips(canvas: Canvas, p: Project, w: Float, h: Float) {
         val bw = barWidth()
-        if (bw != scanCacheKey.toFloat()) { scanCache.clear(); scanCacheKey = bw.toInt() }
+        // 缩放后列数全变，缓存整批作废。用手势结束和缩放变化两处一起清。
+        if (bw != scanCacheBarWidth) {
+            scanCache.clear()
+            scanCacheBarWidth = bw
+        }
 
         for (clip in p.clips) {
             val top = rowTop(clip.track)
@@ -361,7 +380,7 @@ class PlaylistView @JvmOverloads constructor(
         val notes = pat.notesOrNull(clip.track)
         if (notes == null || notes.isEmpty()) return
 
-        val key = (clip.id * 31) xor cols
+        val key = EnvelopeKey(clip.id, cols, clip.start, clip.length, clip.offset)
         val energy = scanCache.getOrPut(key) {
             val e = FloatArray(cols)
             val span = (clip.end - clip.start).coerceAtLeast(1)
@@ -376,6 +395,7 @@ class PlaylistView @JvmOverloads constructor(
                 val amp = (n.velocity / 127f) *
                     (0.62f + 0.38f * kotlin.math.sqrt(n.length / Note.PPQ.toFloat()))
                 for (c in c0..c1) {
+                    if (c < 0 || c >= cols) continue   // e 的长度就是 cols
                     val pos = if (c1 > c0) (c - c0).toFloat() / (c1 - c0) else 0f
                     val v = amp * (1f - 0.4f * pos)
                     if (v > e[c]) e[c] = v
@@ -384,15 +404,20 @@ class PlaylistView @JvmOverloads constructor(
             e
         }
 
+        // 兜底：即便 key 撞了或条目过期，也绝不让绘制越界。
+        // 少一列包络只是看起来薄一点，崩掉是直接闪退。
+        val drawCols = energy.size.coerceAtMost(cols)
+        if (drawCols <= 0) return
+
         var maxE = 0f
-        for (v in energy) if (v > maxE) maxE = v
+        for (i in 0 until drawCols) if (energy[i] > maxE) maxE = energy[i]
         if (maxE < 0.001f) return
 
         val mid = (top + bottom) / 2f
         val half = (bottom - top) / 2f * 0.92f
         b.fill.style = Paint.Style.FILL
         b.fill.color = Palette.withAlpha(color, 210)
-        for (c in 0 until cols) {
+        for (c in 0 until drawCols) {
             val e = energy[c] / maxE
             if (e < 0.02f) continue
             val amp = half * e

@@ -9,11 +9,11 @@ on:
       version_name:
         description: '版本名（例如 1.0.0）'
         required: false
-        default: '1.22'
+        default: '1.22.1'
 
 env:
-  VERSION_NAME: ${{ github.event.inputs.version_name || '1.22' }}
-  VERSION_CODE: '23'
+  VERSION_NAME: ${{ github.event.inputs.version_name || '1.22.1' }}
+  VERSION_CODE: '24'
   # ubuntu-latest 预装了 Android SDK，直接用；不走会坏的 setup-android action
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -66,6 +66,31 @@ jobs:
           /tmp/engine_test
           # 上面必须全绿才算过：这里的回归测试覆盖了"播放无声"那类
           # 渲染循环根本没跑的问题，光编译通过不代表能出声。
+
+      - name: 静态检查（防回归）
+        run: |
+          # 两条真检查，不做事后过滤、不靠人眼。
+          set -e
+
+          # 1) 包络缓存 key 不许再写回 `id * N xor cols`。
+          #    1.22 真机闪退的根因就是这个表达式：它把片段 id 和像素列数
+          #    混进同一个数值空间，两个不同长度的包络撞成同一个 key，
+          #    按当前列数循环就写越界。这里直接禁掉这个写法。
+          if grep -rn 'xor cols' app/src/main/java/com/volt/flowstudio/ui/ | grep -v '^\s*//' ; then
+            echo "✗ 又出现了把列数 xor 进缓存 key 的写法，这会撞 key 并越界"
+            echo "  用带长度的数据类做 key；PlaylistView.EnvelopeKey 是正确写法"
+            exit 1
+          fi
+          echo "✓ 包络缓存 key 未回退"
+
+          # 2) 所有按列循环访问数组的地方，长度必须来自数组本身。
+          #    抓不到全部情况，但能抓住"自己算 cols、却索引别人长度数组"这类。
+          if grep -rn 'for (c in 0 until cols)' app/src/main/java/com/volt/flowstudio/ui/PlaylistView.kt \
+             | grep -v 'drawAudioWave' ; then
+            echo "注意：上面这些按 cols 循环的绘制点，请确认索引的是长度为 cols 的数组"
+          fi
+
+          echo "✓ 静态检查通过"
 
       - name: 构建 Release APK
         run: |

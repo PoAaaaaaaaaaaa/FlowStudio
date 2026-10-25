@@ -475,10 +475,19 @@ class StudioBridge(
                 method == "PUT" && path == "/project" -> handlePutProject(body, query)
                 method == "GET" && path == "/transport" -> 200 to transportJson()
                 method == "POST" && path == "/transport/play" -> {
-                    val ok = runOnMain { session.play() }
-                    if (!ok) return 503 to JSONObject().put("error", "应用繁忙，播放没启动")
-                    broadcast("transport", onMainThread { transportJson() } ?: transportJson())
-                    200 to (onMainThread { transportJson() } ?: transportJson())
+                    // 两个"失败"不能混成一句：主线程没调度上是 503（应用繁忙），
+                    // 调度上了但音频流起不来是设备问题，要回 200 并在结果里说清楚，
+                    // 否则插件会一直重试一个重试也解决不了的错误。
+                    var started = false
+                    val posted = runOnMain { started = session.play() }
+                    if (!posted) return 503 to JSONObject().put("error", "应用繁忙，播放没启动")
+                    val t = onMainThread { transportJson() } ?: transportJson()
+                    if (!started) {
+                        return 200 to t.put("ok", false)
+                            .put("warning", "音频流未能启动（AAudio 与 OpenSL 都失败），传输已推进但没有声音")
+                    }
+                    broadcast("transport", t)
+                    200 to t
                 }
                 method == "POST" && path == "/transport/pause" -> {
                     runOnMain { session.pause() }

@@ -426,7 +426,13 @@ class MainActivity : Activity() {
             } else {
                 if (session.project.tracks.isEmpty()) return@play
                 AudioService.start(this)
-                session.play()
+                // 音频流没起来就不要点亮播放键 —— 那是在撒谎。
+                if (!session.play()) {
+                    transportBar.setPlaying(false)
+                    toast("音频输出没能启动（AAudio 与 OpenSL 都失败）。" +
+                        "检查是否被其他应用独占，或在「更多 → 诊断」里看详情")
+                    return@play
+                }
                 transportBar.setPlaying(true)
             }
         }

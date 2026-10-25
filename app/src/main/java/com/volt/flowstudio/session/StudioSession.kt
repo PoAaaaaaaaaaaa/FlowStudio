@@ -199,11 +199,29 @@ class StudioSession(private val context: Context) {
 
     // ---------------------------------------------------------------- 传输
 
-    fun play() {
-        if (!engine.available) return
-        if (!engine.isAudioRunning()) engine.startAudio()
+    /**
+     * 开始播放。返回音频流是否真的起来了。
+     *
+     * 以前这里是 `if (!running) startAudio()` 然后无条件 play()：
+     * startAudio 失败时界面照样点亮播放键、位置照样走，但一点声音都没有，
+     * 用户只能靠状态面板里那行"音频流没启动"去猜。
+     * 现在把结果交回去，界面能当场告诉用户是设备的问题还是别的问题。
+     */
+    fun play(): Boolean {
+        if (!engine.available) return false
+        if (!engine.isAudioRunning()) {
+            val started = engine.startAudio()
+            if (!started) {
+                // 再确认一次：个别设备上 startAudio 返回 false 但流其实起来了。
+                if (!engine.isAudioRunning()) return false
+            }
+        }
         engine.play()
+        return true
     }
+
+    /** 不关心返回值的地方（桥接、自动恢复播放）用这个。 */
+    fun playOrIgnore() { play() }
 
     fun pause() = engine.pause()
 

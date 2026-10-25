@@ -90,7 +90,11 @@ class StatusSnapshot(
     private fun audioVerdict(engineOn: Boolean, streamRunning: Boolean,
                              frames: Long, peak: Float): String = when {
         !engineOn -> "音频引擎不可用（原生库没加载成功）"
-        !streamRunning -> "音频流没启动（点了播放才会启动；启动失败会退回 OpenSL）"
+        // 分层判断：没播放过和"播放了但流没起来"是两件事，不能都说成"没启动"。
+        // 混在一起说会让用户以为坏了，但其实只是还没按播放。
+        !streamRunning && frames == 0L && !session.isPlaying() ->
+            "待机：音频流按需启动，按播放才会拉起（这不是故障）"
+        !streamRunning -> "音频流启动失败（AAudio 与 OpenSL 都试过了，看日志 FlowStudio）"
         frames == 0L -> "音频流在跑但一帧都没渲染（回调没被调用）"
         peak < 0.0001f -> "渲染正常但输出全静音（检查轨道是否够响、是否被静音/独奏截断）"
         else -> "正常出声（峰值 ${"%.3f".format(peak)}）"
@@ -240,14 +244,25 @@ class StatusSnapshot(
                 put(check("nativeLib", NativeLib.loaded, NativeLib.status))
                 put(check("engine", engineOn,
                     if (engineOn) "引擎已创建" else "引擎没创建，原生库或初始化失败"))
-                put(check("audioStream", audioOn,
-                    if (audioOn) "音频流运行中 @ ${s.engine.sampleRate().toInt()}Hz"
-                    else "音频流未启动（AAudio 和 OpenSL 都没起来）"))
-                put(check("render", st.framesRendered > 0,
-                    "已渲染 ${st.framesRendered} 帧，${st.callbacks} 次回调"))
-                put(check("signal", st.peakEver > 0.0001f,
-                    if (st.peakEver > 0.0001f) "峰值 ${"%.3f".format(st.peakEver)}"
-                    else "从未输出过有效信号"))
+                // 按需启动是设计：没按播放就还没开流，不该标成故障。
+                // 只有"在播却没流"才是真问题。三项分成 idle/live/fail 三态，
+                // 免得每次打开状态面板都看到一排触目惊心的红叉。
+                val streamIdle = !audioOn && !s.isPlaying() && st.framesRendered == 0L
+                put(check("audioStream", audioOn || streamIdle,
+                    when {
+                        audioOn -> "音频流运行中 @ ${s.engine.sampleRate().toInt()}Hz"
+                        streamIdle -> "待机（按需启动，按播放才开流）"
+                        else -> "音频流启动失败（AAudio 和 OpenSL 都没起来）"
+                    }))
+                put(check("render", st.framesRendered > 0 || streamIdle,
+                    if (streamIdle) "还没开始渲染（待机）"
+                    else "已渲染 ${st.framesRendered} 帧，${st.callbacks} 次回调"))
+                put(check("signal", st.peakEver > 0.0001f || streamIdle,
+                    when {
+                        st.peakEver > 0.0001f -> "峰值 ${"%.3f".format(st.peakEver)}"
+                        streamIdle -> "还没输出过信号（待机）"
+                        else -> "从未输出过有效信号"
+                    }))
                 put(check("tracks", p.tracks.isNotEmpty(), "${p.tracks.size} 条轨道"))
                 put(check("notes", noteTotal > 0, "${p.patterns.size} 个样式共 $noteTotal 个音符"))
                 put(check("clips", clipTotal > 0, "$clipTotal 个片段"))
