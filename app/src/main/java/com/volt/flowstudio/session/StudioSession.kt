@@ -57,6 +57,16 @@ class StudioSession(private val context: Context) {
     /** 音频素材变化（导入/恢复/清除）后触发，让界面刷新波形。 */
     var onAudioChanged: (() -> Unit)? = null
 
+    /**
+     * 投递目录监听。
+     *
+     * 插件把音频放进 Music/FlowStudio/inbox/ 后这里自动导入 ——
+     * App 不需要在前台，甚至不需要有人碰它。这是"不拉起应用也能传"的通道：
+     * 插件只往公共目录写文件（有 MANAGE_EXTERNAL 或 SAF 都行），
+     * 文件系统事件把剩下的活干完。
+     */
+    private var inboxObserver: android.os.FileObserver? = null
+
     /** 最近一次 AI 写入前的工程快照，供一键撤销。 */
     private var undoSnapshot: String? = null
     private var undoLabel: String = ""
@@ -114,6 +124,8 @@ class StudioSession(private val context: Context) {
             )
             // 本地桥接：让 DSH 插件能看到并修改这个正在跑的工程
             runCatching { startBridge() }
+            // 投递目录：插件不拉起 App 也能把音频送进来
+            runCatching { startInboxWatch() }
             true
         } catch (t: Throwable) {
             android.util.Log.e("FlowStudio", "会话启动失败", t)
@@ -134,6 +146,8 @@ class StudioSession(private val context: Context) {
     }
 
     fun shutdown() {
+        runCatching { inboxObserver?.stopWatching() }
+        inboxObserver = null
         runCatching { bridge?.stopServer() }
         stopPlayback()
         engine.stopAudio()
@@ -472,6 +486,79 @@ class StudioSession(private val context: Context) {
     fun pushAudioClips() {
         audioStore.pushClips(project)
     }
+
+    // ---------------------------------------------------------------- 投递目录
+
+    /** 插件投递音频的目录：/sdcard/Music/FlowStudio/inbox */
+    fun inboxDir(): File = File(
+        android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_MUSIC
+        ),
+        "FlowStudio/inbox"
+    )
+
+    /**
+     * 开始监听投递目录。
+     *
+     * 用 CLOSE_WRITE 而不是 CREATE：CREATE 触发时文件可能还没写完，
+     * 读到半个文件会解码失败。CLOSE_WRITE 保证写入方已经关闭句柄。
+     *
+     * FileObserver 只监听本目录（非递归）—— 够用，也不引入 INotify 那套复杂度。
+     * 目录不存在时 FileObserver 不会报错，但也不会有事件；
+     * 所以先把目录建出来，再在启动扫描里兜底。
+     */
+    fun startInboxWatch() {
+        val dir = inboxDir()
+        runCatching { dir.mkdirs() }
+
+        inboxObserver?.stopWatching()
+        val observer = object : android.os.FileObserver(dir, android.os.FileObserver.CLOSE_WRITE or android.os.FileObserver.MOVED_TO) {
+            override fun onEvent(event: Int, path: String?) {
+                if (path == null) return
+                if (!path.endsWith(".wav", true) &&
+                    !path.endsWith(".mp3", true) &&
+                    !path.endsWith(".m4a", true) &&
+                    !path.endsWith(".flac", true) &&
+                    !path.endsWith(".ogg", true)) return
+                val f = File(dir, path)
+                if (!f.isFile || f.length() < 1024) return
+                // 从回调里直接导入：importAudio 自己会切 io 线程，
+                // 但 UI 回调（onAudioChanged）必须回主线程，它内部已经处理。
+                importAudio(f, path) { ok, msg ->
+                    // 无论成败都把投递文件删掉：成功是已经进了素材库，
+                    // 失败是留着也没有用（每次启动还会再失败一次）。
+                    runCatching { f.delete() }
+                    if (!ok) {
+                        // 静默失败只记日志；弹 toast 会打断用户正在做的事。
+                        android.util.Log.w("FlowStudio", "投递导入失败 $path: $msg")
+                    }
+                }
+            }
+        }
+        observer.startWatching()
+        inboxObserver = observer
+        // 兜底：App 没在运行时投进来的文件，这次启动补一次扫描。
+        drainInbox()
+    }
+
+    /** 把 inbox 里积压的文件全部导入（App 启动时调用）。 */
+    private fun drainInbox() {
+        val dir = inboxDir()
+        val files = dir.listFiles { f -> f.isFile && f.length() > 1024 } ?: return
+        for (f in files) {
+            importAudio(f, f.name) { ok, msg ->
+                runCatching { f.delete() }
+                if (!ok) android.util.Log.w("FlowStudio", "积压投递导入失败 ${f.name}: $msg")
+            }
+        }
+        if (files.isNotEmpty()) {
+            android.util.Log.i("FlowStudio", "补导入 ${files.size} 个投递文件")
+        }
+    }
+
+    /** 供桥接查询投递状态，插件能确认文件有没有被吃掉。 */
+    fun inboxPending(): List<String> =
+        inboxDir().listFiles { f -> f.isFile }?.map { it.name } ?: emptyList()
 
     /** 一次性清空所有音频片段与素材（含磁盘文件），给插件的重置动作。 */
     fun clearAllAudio() {

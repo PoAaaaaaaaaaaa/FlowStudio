@@ -14,6 +14,24 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.24 更新
+
+- **导音频支持 mp3 等压缩格式**：以前 AudioStore 只认 PCM WAV，
+  导 mp3 会直接报"无法解码"。现在先试 WAV（最快路径），失败自动走
+  MediaExtractor + MediaCodec —— mp3 / m4a / aac / flac / ogg 全支持，
+  全是平台自带能力，不引第三方库。
+  解码器输出 16-bit 整型与 float 两种 PCM 编码都处理了：只处理 16-bit
+  的话，某些设备的解码器输出 float，表现就是静音。
+  采样率保持源文件不动：引擎本来就会按 sampleRate 插值，解码端重采样
+  只损失质量。上限 10 分钟 / 约 92 MB float，防手滑把整张专辑导进来。
+- **免拉起传输（投递目录）**：新增 `/sdcard/Music/FlowStudio/inbox/`。
+  把音频丢进去，App 里的 FileObserver（监听 CLOSE_WRITE，避免读到半个文件）
+  立即导入成音频片段并删掉投递文件；App 没在运行时投的，下次启动扫描补导。
+  桥接新增 GET/DELETE `/inbox` 两个端点，capabilities 声明 `audio.inbox`、`audio.mp3`。
+- 插件新增 `flowstudio_drop_audio`：原样投递（mp3 就投 mp3，不用先转 WAV——
+  这免掉了容器到手机 48MB WAV 的传输）；`flowstudio_fetch_music` 加 `drop: true`
+  一步下载+投递。投递确认用素材数量对比而不是"文件消失"（文件消失也可能是清理）。
+
 ## 1.23 更新
 
 - **编排页补上缩放**：双指捏合（以捏合中心为锚点，想看的那段不会飞出屏幕）、

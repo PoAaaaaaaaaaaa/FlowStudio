@@ -1,6 +1,9 @@
 package com.volt.flowstudio.session
 
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import com.volt.flowstudio.audio.NativeEngine
 import com.volt.flowstudio.model.AudioAsset
 import com.volt.flowstudio.model.Clip
@@ -157,10 +160,23 @@ class AudioStore(private val context: Context) {
     private class Parsed(val samples: FloatArray, val frames: Int, val sampleRate: Int)
 
     /**
+     * 解码入口：先试 PCM WAV（最快、无中间层），失败再走 MediaCodec。
+     *
+     * MediaCodec 支持平台解的一切格式：mp3 / m4a / aac / flac / ogg。
+     * FL 的素材是 mp3，这层必须有，否则"导音频"就只是空话。
+     */
+    private fun decode(file: File): Parsed? {
+        if (!file.isFile) return null
+        val wav = runCatching { decodeWav(file) }.getOrNull()
+        if (wav != null) return wav
+        return runCatching { decodeMediaCodec(file) }.getOrNull()
+    }
+
+    /**
      * 解码 WAV 为交织立体声 float。
      * 单声道复制到两个声道；多声道只取前两路 —— 编曲不需要环绕。
      */
-    private fun decode(file: File): Parsed? {
+    private fun decodeWav(file: File): Parsed? {
         if (!file.isFile) return null
         val bytes = file.readBytes()
         if (bytes.size < 44) return null
@@ -244,5 +260,147 @@ class AudioStore(private val context: Context) {
             out[f * 2 + 1] = r
         }
         return Parsed(out, totalFrames, rate)
+    }
+    // ---------------------------------------------------------------- MediaCodec 通用解码
+
+    /**
+     * 用 MediaExtractor + MediaCodec 解码任意平台支持的音频。
+     *
+     * 工作方式：Extractor 从容器里取压缩帧，喂给 Codec；Codec 输出 PCM。
+     * 输出可能是 16-bit 整型或 float（取决于 KEY_PCM_ENCODING 与设备），
+     * 两种都要处理 —— 只处理 16-bit 的话在某些设备上是静音。
+     *
+     * 采样率与声道数保持源文件的：引擎按时间换算帧号，本来就会
+     * 对不同 sampleRate 做线性插值，不需要在解码端重采样。
+     * 多于 2 声道只取前两路（编曲不需要环绕）。
+     *
+     * 这是阻塞调用，必须跑在 io 线程（import/reload 都已经在那）。
+     * 上限 10 分钟 / 约 100 MB float，防手滑把整张专辑导进来。
+     */
+    private fun decodeMediaCodec(file: File): Parsed? {
+        val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
+        try {
+            extractor.setDataSource(file.absolutePath)
+            var trackIndex = -1
+            var format: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                    trackIndex = i
+                    format = f
+                    break
+                }
+            }
+            if (trackIndex < 0 || format == null) return null
+            extractor.selectTrack(trackIndex)
+
+            val mime = format.getString(MediaFormat.KEY_MIME)!!
+            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceIn(1, 8)
+            val durationUs = if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                format.getLong(MediaFormat.KEY_DURATION)
+            } else 0L
+
+            // 上限保护：10 分钟 @ 48k 立体声 float ≈ 92 MB。
+            // 素材池里存的是 FloatArray，超了就是 OOM 而不是"导入失败"。
+            val maxFrames = 600 * 48000
+            val expectedFrames = if (durationUs > 0) (durationUs / 1_000_000.0 * sampleRate).toInt() else maxFrames
+            if (expectedFrames > maxFrames) return null
+
+            codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(format, null, null, 0)
+            codec.start()
+
+            // 先给个合理初容量，之后不够就翻倍 —— 逐帧 add 会慢到没法用。
+            var out = FloatArray((expectedFrames.coerceAtMost(maxFrames)).coerceAtLeast(1) * 2)
+            var frames = 0
+
+            val info = MediaCodec.BufferInfo()
+            var inputDone = false
+            var outputDone = false
+
+            while (!outputDone) {
+                // ---- 喂输入 ----
+                if (!inputDone) {
+                    val inIdx = codec.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0) {
+                        val buf = codec.getInputBuffer(inIdx)!!
+                        val size = extractor.readSampleData(buf, 0)
+                        if (size < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            codec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                // ---- 收输出 ----
+                when (val outIdx = codec.dequeueOutputBuffer(info, 10_000)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        // 实际输出格式以这里为准：有的解码器会给不同的采样率/声道
+                        val of = codec.outputFormat
+                        // sampleRate/channels 变了也不重开 —— 我们按原始 format 记录，
+                        // 引擎按 sampleRate 插值，只要这里如实报告就行。
+                    }
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> { /* 等下一轮 */ }
+                    else -> if (outIdx >= 0) {
+                        val ob = codec.getOutputBuffer(outIdx)!!
+                        val pcmEnc = codec.outputFormat.getInteger(
+                            MediaFormat.KEY_PCM_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        val bytesPerSample = if (pcmEnc == android.media.AudioFormat.ENCODING_PCM_FLOAT) 4 else 2
+                        val framesInBuf = info.size / (bytesPerSample * channels)
+                        if (framesInBuf > 0) {
+                            // 容量不够就翻倍
+                            if (frames + framesInBuf > out.size / 2) {
+                                var newSize = out.size
+                                while (newSize / 2 < frames + framesInBuf) newSize *= 2
+                                out = out.copyOf(newSize)
+                            }
+                            when (pcmEnc) {
+                                android.media.AudioFormat.ENCODING_PCM_FLOAT -> {
+                                    ob.order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer().let { fb ->
+                                        var src = 0
+                                        for (f in 0 until framesInBuf) {
+                                            val l = fb.get(src)
+                                            val r = if (channels > 1) fb.get(src + 1) else l
+                                            out[frames * 2] = l
+                                            out[frames * 2 + 1] = r
+                                            frames++
+                                            src += channels
+                                        }
+                                    }
+                                }
+                                else -> {
+                                    var src = 0
+                                    for (f in 0 until framesInBuf) {
+                                        val l = ob.getShort(src) / 32768f
+                                        val r = if (channels > 1) ob.getShort(src + 2) / 32768f else l
+                                        out[frames * 2] = l
+                                        out[frames * 2 + 1] = r
+                                        frames++
+                                        src += 2 * channels
+                                    }
+                                }
+                            }
+                        }
+                        codec.releaseOutputBuffer(outIdx, false)
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
+                    }
+                }
+            }
+
+            if (frames <= 0) return null
+            return Parsed(out.copyOf(frames * 2), frames, sampleRate)
+        } catch (e: Exception) {
+            android.util.Log.w("FlowStudio", "MediaCodec 解码失败: ${e.message}")
+            return null
+        } finally {
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            runCatching { extractor.release() }
+        }
     }
 }

@@ -572,6 +572,17 @@ class StudioBridge(
                 }
                 method == "DELETE" && path.startsWith("/audio/") ->
                     handleDeleteAudio(path.removePrefix("/audio/").toIntOrNull())
+                // 投递目录：插件不拉起 App 也能传音频的通道。
+                // GET 查积压，DELETE 清空（文件已由监听器吃掉但残留时用）。
+                method == "GET" && path == "/inbox" -> 200 to JSONObject()
+                    .put("ok", true)
+                    .put("dir", session.inboxDir().absolutePath)
+                    .put("pending", JSONArray(session.inboxPending()))
+                method == "DELETE" && path == "/inbox" -> {
+                    val removed = session.inboxPending().size
+                    session.inboxDir().listFiles { f -> f.isFile }?.forEach { runCatching { it.delete() } }
+                    200 to JSONObject().put("ok", true).put("removed", removed)
+                }
                 method == "POST" && path == "/clips" -> handleAddClip(body)
                 method == "DELETE" && path.startsWith("/clips/") ->
                     handleDeleteClip(path.removePrefix("/clips/").toIntOrNull())
@@ -1361,7 +1372,8 @@ class StudioBridge(
                 "batch", "clips.arrange", "clips.patch", "automation.upsert",
                 "pattern.create", "pattern.patch", "pattern.delete", "tracks.reorder",
                 "undo", "selection", "events.longpoll", "events.sse",
-                "notes.fine", "track.group", "audio.import", "audio.clips"
+                "notes.fine", "track.group", "audio.import", "audio.clips",
+                "audio.inbox", "audio.mp3"
             )))
             .put("limits", JSONObject()
                 .put("batchOps", 200)
