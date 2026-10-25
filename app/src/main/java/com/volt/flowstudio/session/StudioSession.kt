@@ -473,6 +473,17 @@ class StudioSession(private val context: Context) {
         audioStore.pushClips(project)
     }
 
+    /** 一次性清空所有音频片段与素材（含磁盘文件），给插件的重置动作。 */
+    fun clearAllAudio() {
+        project.clips.removeAll { it.isAudio }
+        val files = project.audioAssets.map { File(context.filesDir, it.path) }
+        project.audioAssets.clear()
+        audioStore.clear()
+        files.forEach { runCatching { it.delete() } }
+        scheduleAutoSave()
+        onAudioChanged?.invoke()
+    }
+
     private fun reloadLastOrDefault() {
         val path = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_LAST, null)

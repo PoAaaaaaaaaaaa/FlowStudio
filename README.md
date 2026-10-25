@@ -14,6 +14,18 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.23 更新
+
+- **编排页补上缩放**：双指捏合（以捏合中心为锚点，想看的那段不会飞出屏幕）、
+  双击放大/还原、工具栏 −/x/＋ 三档。三条路径共用同一套边界（0.25x–12x），
+  不会出现"按钮到头了但还能继续捏"的不一致。
+- **修误触**：拖动阈值从 12dp 提到 18dp，手指抖动不再把片段拖走；
+  空点导入只在"真的点了一下"时触发，平移屏幕不再弹导入框；
+  两指一落下就进入平移/缩放模式并取消编辑手势，捏合时片段不会跟着手指跑；
+  右缘把手热区放宽到 22dp，更好点中。
+- 桥接新增 `/audio/clear`（清空全部音频素材）与 `PATCH /clips/{id}` 的 `audioGain` 字段；
+  路由顺序修正：`/audio/clear` 不再被当成"删 id=clear"。
+
 ## 1.22.1 更新
 
 - **修闪退**：`ArrayIndexOutOfBoundsException: length=361; index=361 @

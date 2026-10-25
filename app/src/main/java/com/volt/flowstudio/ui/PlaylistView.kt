@@ -38,7 +38,20 @@ class PlaylistView @JvmOverloads constructor(
     var selectedTrack: Int = 0
         set(v) { field = v; invalidate() }
 
-    /** 每小节像素宽；0 = 按内容自适应。 */
+    /**
+     * 缩放系数。1 = 默认（每屏约 12 小节）。
+     * 双指捏合、双击、以及工具栏的 ± 都改它 —— 三条路径共用一套边界。
+     */
+    var zoom: Float = 1f
+        set(v) {
+            val nv = v.coerceIn(MIN_ZOOM, MAX_ZOOM)
+            if (field == nv) return
+            field = nv
+            scanCache.clear()   // 列数全变，旧包络直接作废
+            invalidate()
+        }
+
+    /** 每小节像素宽；给了确定值就优先用它（工具栏放大缩小走这条）。 */
     var pixelsPerBar: Float = 0f
 
     /** 素材 id → 波形峰值。由 MainActivity 在刷新时绑定。 */
@@ -71,12 +84,25 @@ class PlaylistView @JvmOverloads constructor(
     private var drag = Drag.NONE
     private var activeClip: Clip? = null
     private var dragStartX = 0f
+    private var dragStartY = 0f
     private var origStart = 0
     private var origLen = 0
     private var origOffset = 0
     private var panX = 0f
     private var panY = 0f
     private var loopAnchor = 0
+
+    // ---- 手势状态 ----
+    private var pinchActive = false
+    private var pinchStartDist = 0f
+    private var pinchStartZoom = 1f
+    private var pinchAnchorTick = 0
+    private var downX = 0f
+    private var downY = 0f
+    private var moved = false          // 是否已越过拖动阈值
+    private var lastTapTime = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
 
     /**
      * 音符片段的包络缓存。
@@ -93,17 +119,36 @@ class PlaylistView @JvmOverloads constructor(
     private data class EnvelopeKey(
         val clipId: Int, val cols: Int, val start: Int, val length: Int, val offset: Int
     )
+    companion object {
+        /** 缩放边界。再小就看不清片段边界，再大就一分钟要翻十屏。 */
+        const val MIN_ZOOM = 0.25f
+        const val MAX_ZOOM = 12f
+
+        /**
+         * 拖动判定阈值（dp）。
+         *
+         * 之前按 12dp 算"这是拖动不是点击"，手指稍抖就越过阈值，
+         * 于是想点一下片段却把它拖走了 —— 这就是误触的来源。
+         * 抬到 18dp：比常见的指尖抖动幅度大一点，又不至于让真拖动变迟钝。
+         */
+        const val DRAG_SLOP_DP = 18f
+
+        /** 拖右缘改长度时，命中把手的热区宽度。放宽到 22dp 更好点中。 */
+        const val HANDLE_DP = 22f
+    }
+
     private val scanCache = HashMap<EnvelopeKey, FloatArray>()
     private var scanCacheBarWidth = -1f
 
     // ---------------------------------------------------------------- 几何
 
     private fun barWidth(): Float {
-        if (pixelsPerBar > 0f) return pixelsPerBar
+        if (pixelsPerBar > 0f) return pixelsPerBar * zoom
         val p = project ?: return dp(120f)
         val bars = p.lengthBars().coerceAtLeast(8)
         val usable = width - headerWidth
-        return max(dp(52f), usable / min(bars, 12).toFloat())
+        // 一屏大约 12 小节是默认密度；zoom 直接乘上去。
+        return max(dp(24f), usable / min(bars, 12).toFloat()) * zoom
     }
 
     private fun tickToX(t: Int): Float = headerWidth + (t * barWidth() / Note.BAR) - scrollX
@@ -452,8 +497,28 @@ class PlaylistView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 dragStartX = e.x
+                dragStartY = e.y
+                downX = e.x
+                downY = e.y
+                moved = false
                 panX = e.x
                 panY = e.y
+
+                // 双击缩放。放在所有命中判定之前：
+                // 双击是一个独立意图，不该先被"选中片段"截走。
+                val now = System.currentTimeMillis()
+                val isDoubleTap = now - lastTapTime < 300L &&
+                    abs(e.x - lastTapX) < dp(40f) && abs(e.y - lastTapY) < dp(40f)
+                lastTapTime = now
+                lastTapX = e.x
+                lastTapY = e.y
+
+                if (isDoubleTap && e.y > rulerHeight) {
+                    // 以双击位置为中心缩放，这样想放大的那一小段不会跑出屏幕。
+                    zoomAround(e.x, if (zoom < 3f) zoom * 2f else 1f)
+                    drag = Drag.NONE
+                    return true
+                }
 
                 // 标尺
                 if (e.y < rulerHeight) {
@@ -515,15 +580,46 @@ class PlaylistView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
+                // 两指落下就进入"平移 + 缩放"模式，取消一切编辑手势。
+                // 这一条是防误触的主力：以前两指操作时如果先按到了片段，
+                // 片段会跟着手指跑，用户以为自己在缩放，结果把音符拖乱了。
                 drag = Drag.PAN
                 activeClip = null
+                moved = false
+                pinchActive = e.pointerCount >= 2
+                if (pinchActive) {
+                    pinchStartDist = pointerSpan(e)
+                    pinchStartZoom = zoom
+                    // 记住捏合中心对应的时间点，缩放时让它保持不动
+                    pinchAnchorTick = xToTick((e.getX(0) + e.getX(1)) / 2f)
+                }
                 panX = (e.getX(0) + e.getX(1)) / 2f
                 panY = (e.getY(0) + e.getY(1)) / 2f
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
-                if (drag == Drag.SEEK && abs(e.x - dragStartX) > dp(12f)) drag = Drag.PAN
+                // 捏合缩放优先，不参与任何编辑
+                if (pinchActive && e.pointerCount >= 2) {
+                    val span = pointerSpan(e)
+                    if (pinchStartDist > 1f && span > 1f) {
+                        val ratio = span / pinchStartDist
+                        applyZoomAnchored(pinchStartZoom * ratio, pinchAnchorTick)
+                    }
+                    return true
+                }
+
+                // 还没越过阈值就什么都不做 —— 手指的微小抖动不该移动片段。
+                if (!moved) {
+                    if (abs(e.x - downX) < dp(DRAG_SLOP_DP) &&
+                        abs(e.y - downY) < dp(DRAG_SLOP_DP)) {
+                        return true
+                    }
+                    moved = true
+                    // 只有确定是拖动之后，才从"点击"升级成"平移/改长度"
+                    if (drag == Drag.SEEK) drag = Drag.PAN
+                }
+
                 when (drag) {
                     Drag.PAN -> {
                         val mx = if (e.pointerCount >= 2) (e.getX(0) + e.getX(1)) / 2f else e.x
@@ -576,6 +672,15 @@ class PlaylistView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val wasPinch = pinchActive
+                pinchActive = false
+                if (wasPinch) {
+                    // 捏合结束后不要触发"空点导入"或"片段改动"这类副作用
+                    drag = Drag.NONE
+                    activeClip = null
+                    invalidate()
+                    return true
+                }
                 if (drag == Drag.LOOP) {
                     if (loopEnd - loopStart < Note.STEP) loopEnd = loopStart + Note.BAR
                     loopOn = true
@@ -585,8 +690,9 @@ class PlaylistView @JvmOverloads constructor(
                     scanCache.clear()
                     onClipsChanged?.invoke()
                 }
-                if (drag == Drag.SEEK) {
-                    // 空点一下：交给外面判断要不要弹导入入口。
+                if (drag == Drag.SEEK && !moved) {
+                    // 只有"真的点了一下"（没越过阈值）才弹空态导入。
+                    // 以前的写法只要起点落在空白就触发，于是平移屏幕也会弹导入框。
                     val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
                     if (row in p.tracks.indices) onEmptyTap?.invoke(row, xToTick(e.x).coerceAtLeast(0))
                 }
@@ -597,6 +703,50 @@ class PlaylistView @JvmOverloads constructor(
             }
         }
         return true
+    }
+
+    // ---------------------------------------------------------------- 缩放
+
+    /** 两指之间的距离，用于捏合比例。 */
+    private fun pointerSpan(e: MotionEvent): Float {
+        if (e.pointerCount < 2) return 0f
+        val dx = e.getX(1) - e.getX(0)
+        val dy = e.getY(1) - e.getY(0)
+        return kotlin.math.sqrt(dx * dx + dy * dy)
+    }
+
+    /** 以某个屏幕点的位置为中心缩放（双击用）。 */
+    private fun zoomAround(screenX: Float, target: Float) {
+        val anchorTick = xToTick(screenX)
+        applyZoomAnchored(target, anchorTick)
+    }
+
+    /**
+     * 缩放，并让 anchorTick 这个时间点停在屏幕上的同一位置。
+     *
+     * 不做锚定的话，缩放会以左边缘为基准，你想看的那一段会飞出屏幕 ——
+     * 这是"能缩放但不好用"的典型症状。
+     */
+    private fun applyZoomAnchored(target: Float, anchorTick: Int) {
+        val oldBw = barWidth()
+        val anchorScreenX = headerWidth + (anchorTick * oldBw / Note.BAR) - scrollX
+        zoom = target
+        val newBw = barWidth()
+        // 让 anchorTick 在新缩放下仍落在 anchorScreenX
+        val desired = headerWidth + (anchorTick * newBw / Note.BAR) - anchorScreenX
+        scrollX = desired.coerceAtLeast(0f)
+        scanCache.clear()
+        invalidate()
+    }
+
+    /** 工具栏用：按倍数缩放，锚定在屏幕中心。 */
+    fun zoomBy(factor: Float) {
+        applyZoomAnchored(zoom * factor, xToTick(if (width > 0) width / 2f else dp(200f)))
+    }
+
+    /** 工具栏用：回到默认密度。 */
+    fun zoomReset() {
+        applyZoomAnchored(1f, playheadTick)
     }
 
     fun scrollByX(px: Float) {

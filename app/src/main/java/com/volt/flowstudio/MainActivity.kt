@@ -413,8 +413,11 @@ class MainActivity : Activity() {
             },
             "导入音频" to { pickAudio() },
             "定位" to { session.seek(0); refreshPlayhead(); toast("已回到开头") },
-            "缩小" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(42).toFloat() else (playlist.pixelsPerBar / 1.35f).coerceAtLeast(dp(28).toFloat()); playlist.invalidate() },
-            "放大" to { playlist.pixelsPerBar = if (playlist.pixelsPerBar <= 0f) dp(120).toFloat() else (playlist.pixelsPerBar * 1.35f).coerceAtMost(dp(360).toFloat()); playlist.invalidate() }
+            // 统一走 zoom：三条路径（按钮 / 双指 / 双击）共用同一套边界，
+            // 不会出现"按钮放到最大了但还能继续捏合"这种不一致。
+            "−" to { playlist.zoomBy(1f / 1.4f) },
+            "${kotlin.math.round(playlist.zoom).toInt()}x" to { playlist.zoomReset() },
+            "＋" to { playlist.zoomBy(1.4f) }
         )
     }
 

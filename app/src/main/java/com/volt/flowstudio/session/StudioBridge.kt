@@ -558,8 +558,18 @@ class StudioBridge(
                 // 试听某个音符（不写入，只发声）
                 method == "POST" && path == "/audition" -> handleAudition(body)
                 // 音频：素材列表 + 导入 + 删除。片段本身走 /clips*。
+                // 注意路由顺序：具体路径必须排在 /audio/{id} 之前，
+                // 否则 DELETE /audio/clear 会被当成"删 id=clear"而 400。
                 method == "GET" && path == "/audio" -> 200 to audioJson()
                 method == "POST" && path == "/audio/import" -> handleAudioImport(body)
+                method == "POST" && path == "/audio/clear" -> {
+                    // 清空全部音频素材与片段。给插件一个"重置音频"的原子动作，
+                    // 不用先列一遍再逐个删。
+                    runOnMain { session.clearAllAudio() }
+                    bumpRevision()
+                    session.notifyExternalEdit("清空音频")
+                    200 to audioJson()
+                }
                 method == "DELETE" && path.startsWith("/audio/") ->
                     handleDeleteAudio(path.removePrefix("/audio/").toIntOrNull())
                 method == "POST" && path == "/clips" -> handleAddClip(body)
@@ -1567,6 +1577,11 @@ class StudioBridge(
                 if (op.has("lengthTicks")) c.length = op.optInt("lengthTicks", c.length)
                 if (op.has("offsetTicks")) c.offset = op.optInt("offsetTicks", c.offset)
                 if (op.has("label")) c.label = op.optString("label", c.label)
+                // 音频片段专有：增益。样式片段上写了也不报错，只是无效。
+                if (op.has("audioGain")) {
+                    c.audioGain = op.optDouble("audioGain", c.audioGain.toDouble())
+                        .toFloat().coerceIn(0f, 2f)
+                }
                 return JSONObject().put("ok", true).put("id", c.id)
             }
             "clips.delete" -> {
