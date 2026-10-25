@@ -53,6 +53,7 @@ class BackingTrack(private val context: Context) {
             fileName = target.name
             frames = parsed.frames
             sampleRate = parsed.sampleRate
+            computePeaks(parsed.samples, parsed.frames)
             pushToEngine()
             onDone?.invoke(true, "${src.name} · ${"%.1f".format(parsed.frames.toDouble() / parsed.sampleRate)} 秒")
         }
@@ -68,6 +69,7 @@ class BackingTrack(private val context: Context) {
             fileName = f.name
             frames = parsed.frames
             sampleRate = parsed.sampleRate
+            computePeaks(parsed.samples, parsed.frames)
             pushToEngine()
             onDone?.invoke(true)
         }
@@ -76,6 +78,7 @@ class BackingTrack(private val context: Context) {
     fun clear() {
         fileName = ""
         frames = 0
+        peaks = FloatArray(0)
         NativeEngine.instance.clearBackingTrack()
     }
 
@@ -95,6 +98,36 @@ class BackingTrack(private val context: Context) {
     }
 
     private var cached: FloatArray? = null
+
+    /**
+     * 波形峰值：每段取最大绝对值，供时间线绘制。
+     * 直接画解调后的样本会因密度过高变成一团噪声，
+     * 必须先降采样成固定数量的峰值点。
+     */
+    var peaks: FloatArray = FloatArray(0)
+        private set
+
+    private fun computePeaks(data: FloatArray, frames: Int, buckets: Int = 1200) {
+        if (frames <= 0 || data.size < 2) { peaks = FloatArray(0); return }
+        val n = buckets.coerceIn(64, 4000)
+        val out = FloatArray(n)
+        val per = (frames.toDouble() / n).coerceAtLeast(1.0)
+        for (i in 0 until n) {
+            val start = (i * per).toInt().coerceIn(0, frames - 1)
+            val end = ((i + 1) * per).toInt().coerceIn(start + 1, frames)
+            var peak = 0f
+            var f = start
+            while (f < end) {
+                val l = kotlin.math.abs(data[f * 2])
+                val r = kotlin.math.abs(data[f * 2 + 1])
+                if (l > peak) peak = l
+                if (r > peak) peak = r
+                f++
+            }
+            out[i] = peak.coerceIn(0f, 1f)
+        }
+        peaks = out
+    }
 
     private fun pushToEngine() {
         val data = cached ?: return

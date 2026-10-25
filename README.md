@@ -14,6 +14,16 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.20 更新
+
+- 主界面改为音频时间线：左侧轨道头（波形图标 + 名称 + 时长）、右侧真实波形、顶部小节刻度尺。
+- 波形来自解码后的真实采样（每段取峰值，1200 个峰值点），不是假图形。
+- 时间线支持点击定位、点轨道头打开设置、空轨长按导入。
+- 汉堡导航重做：图标按钮 + 当前页/提示两行 + 页码，展开是自绘面板（图形标记/说明/对勾），
+  入场用 OvershootInterpolator 300ms 回弹。
+- 借鉴 BouncingJellyView 手感：竖向越界拖拽触发阻尼缩放，松手 300ms 回弹。
+- 插件新增音视频工具：probe / to_wav / extract_audio / mux_video，共 24 个工具。
+
 ## 1.19 更新
 
 - 新增伴奏音频轨：可导入 WAV（16/24/32-bit PCM 与 float），与编曲一起按工程时间轴播放。

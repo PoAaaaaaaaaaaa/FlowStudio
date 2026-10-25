@@ -35,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var auto: AutomationView
     private lateinit var keys: KeyboardView
     private lateinit var rack: ChannelRackView
+    private lateinit var timeline: AudioTimelineView
     private lateinit var banner: android.widget.TextView
     private var aiBanner: FlowButton? = null
     private var currentDialog: android.app.Dialog? = null
@@ -60,8 +61,11 @@ class MainActivity : Activity() {
     private var navMenuButton: FlowButton? = null
     private var navTitle: TextView? = null
     private var navSubtitle: TextView? = null
-    private val tabTitles = listOf("机架", "步进", "卷帘", "编排", "混音", "自动化")
+    private var navProgress: TextView? = null
+    private var navSheet: android.app.Dialog? = null
+    private val tabTitles = listOf("时间线", "机架", "步进", "卷帘", "编排", "混音", "自动化")
     private val tabHints = listOf(
+        "音频波形 · 点轨道头设置",
         "点格子写音 · 长按通道管理",
         "16 格步进编辑",
         "钢琴卷帘 · 双指缩放",
@@ -196,49 +200,67 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply { gravity = android.view.Gravity.TOP })
 
-        // ---- 1. 汉堡导航：一行显示当前页，点开切换 ----
-        // 之前六个页签横排，占掉一整行高度且在小屏上字很挤。
-        // 现在只留「☰ 当前页」，点击弹出列表，切换走 showTab。
+        // ---- 1. 汉堡导航 ----
+        // 之前只是一个「☰」文本按钮 + 一行字，点开是系统列表，既没有层级也没有反馈。
+        // 现在：图标带圆形底、当前页名与提示分两行、右侧显示页序进度，
+        // 点开是一个带选中标记、图标与说明的自绘面板（NavPanelView）。
         tabBarView = null
         val bar = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(dp(6), 0, dp(8), 0)
+            setPadding(dp(8), 0, dp(10), 0)
             setBackgroundColor(Palette.SURFACE)
         }
         navBar = bar
+
+        val menu = android.widget.FrameLayout(this)
         navMenuButton = FlowButton(this).apply {
             text = "☰"
-            textSize = 16f
-            buttonColor = Palette.SURFACE
+            textSize = 15f
+            buttonColor = Palette.PANEL_HI
             foregroundColor = Palette.TEXT
             setPadding(0, 0, 0, 0)
-            minWidth = dp(44)
-            minHeight = dp(36)
-            minimumWidth = dp(44)
-            minimumHeight = dp(36)
-            setOnClickListener { showNavMenu() }
+            minWidth = dp(34)
+            minHeight = dp(34)
+            minimumWidth = dp(34)
+            minimumHeight = dp(34)
+            setOnClickListener { openNavSheet() }
         }
-        bar.addView(navMenuButton, android.widget.LinearLayout.LayoutParams(
-            dp(44), dp(36)
-        ).apply { marginEnd = dp(4) })
+        menu.addView(navMenuButton, android.widget.FrameLayout.LayoutParams(dp(34), dp(34)))
+        bar.addView(menu, android.widget.LinearLayout.LayoutParams(dp(34), dp(34))
+            .apply { marginEnd = dp(10) })
+
+        // 标题与提示上下两行，左侧一条强调色竖条作为视觉锚点
+        val titleBox = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
         navTitle = TextView(this).apply {
             text = tabTitles[0]
             setTextColor(Palette.TEXT)
             textSize = 13f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setPadding(dp(6), 0, 0, 0)
         }
-        bar.addView(navTitle, android.widget.LinearLayout.LayoutParams(
-            0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-        ))
+        titleBox.addView(navTitle)
         navSubtitle = TextView(this).apply {
-            text = ""
+            text = tabHints[0]
             setTextColor(Palette.TEXT_FAINT)
             textSize = 9f
-            setPadding(0, 0, dp(8), 0)
         }
-        bar.addView(navSubtitle, android.widget.LinearLayout.LayoutParams(
+        titleBox.addView(navSubtitle)
+        bar.addView(titleBox, android.widget.LinearLayout.LayoutParams(
+            0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        // 右侧页码：让人知道自己在整个工作流的哪个位置
+        navProgress = TextView(this).apply {
+            text = "1 / ${tabTitles.size}"
+            setTextColor(Palette.TEXT_FAINT)
+            textSize = 9f
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            setBackgroundColor(Palette.PANEL)
+        }
+        bar.addView(navProgress, android.widget.LinearLayout.LayoutParams(
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
         ))
@@ -292,7 +314,18 @@ class MainActivity : Activity() {
         chromeBottom = transportH + footerH
 
         // ---- 页面 ----
-        // 0. 通道机架
+        // 0. 音频时间线：主界面。参照多轨编辑器：左轨道头、右波形、上方刻度尺。
+        val timelineHolder = FrameLayout(this)
+        timeline = AudioTimelineView(this).apply {
+            onSeek = { tick -> session.seek(tick); refreshPlayhead() }
+            onLaneTap = { showBackingSettings() }
+            onRequestImport = { pickBackingAudio() }
+        }
+        addToolbar(timelineHolder, "音频时间线", "点轨道头设置 · 长按空白导入")
+        timelineHolder.addView(timeline, pageBodyParams())
+        content.addView(timelineHolder, matchParams())
+
+        // 1. 通道机架
         rack = ChannelRackView(this)
         content.addView(rack, matchParams())
 
@@ -388,7 +421,7 @@ class MainActivity : Activity() {
         val toolbar = EditorToolbar(this).apply {
             this.title = title
             this.subtitle = subtitle
-            onSwipePage = { direction -> showTab((currentTab + direction).coerceIn(0, 5)) }
+            onSwipePage = { direction -> showTab((currentTab + direction).coerceIn(0, tabTitles.lastIndex)) }
         }
         holder.addView(toolbar, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, toolBarHeight
@@ -705,24 +738,50 @@ class MainActivity : Activity() {
         lightRefresh(index)
         ((content.getChildAt(index) as? FrameLayout)?.getChildAt(0) as? EditorToolbar)?.let { toolbar ->
             when (index) {
-                2 -> configurePianoTools(toolbar)
-                3 -> configurePlaylistTools(toolbar)
+                3 -> configurePianoTools(toolbar)
+                4 -> configurePlaylistTools(toolbar)
             }
         }
         navTitle?.text = tabTitles[index]
         navSubtitle?.text = tabHints.getOrElse(index) { "" }
+        navProgress?.text = "${index + 1} / ${tabTitles.size}"
     }
 
-    /** 汉堡菜单：列出全部页面，选中即切换。切换本身不再有动画延迟。 */
-    private fun showNavMenu() {
-        val items = tabTitles.mapIndexed { i, name ->
-            if (i == currentTab) "$name  ·  当前" else name
-        }.toTypedArray()
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("切换页面")
-            .setItems(items) { _, which -> showTab(which) }
-            .setNegativeButton("取消", null)
-            .show()
+    /**
+     * 汉堡菜单：带图标的页面选择面板。
+     *
+     * 入场用 OvershootInterpolator（与参考工程的回弹手感一致）：
+     * 从 0.92 缩放到 1，300ms，带轻微过冲。
+     */
+    private fun openNavSheet() {
+        val panel = NavPanelView(this, tabTitles, tabHints, currentTab) { idx ->
+            navSheet?.dismiss()
+            showTab(idx)
+        }
+        val dialog = android.app.Dialog(this)
+        dialog.setContentView(panel)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.window?.attributes = dialog.window?.attributes?.apply {
+            dimAmount = 0.45f
+            windowAnimations = 0
+        }
+        dialog.setOnDismissListener { navSheet = null }
+        navSheet = dialog
+        dialog.show()
+        dialog.window?.setLayout(dp(300), panel.desiredHeight())
+        dialog.window?.setGravity(android.view.Gravity.TOP or android.view.Gravity.START)
+
+        // 回弹入场：缩放 + 轻微位移，比系统淡入更有"点开了"的感觉。
+        panel.scaleX = 0.92f
+        panel.scaleY = 0.92f
+        panel.alpha = 0f
+        panel.translationY = -dp(6).toFloat()
+        panel.animate()
+            .scaleX(1f).scaleY(1f).alpha(1f).translationY(0f)
+            .setDuration(300L)
+            .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
+            .start()
     }
 
     /** 切换页面时的最小刷新：只动需要的那几个 View。 */
@@ -730,33 +789,39 @@ class MainActivity : Activity() {
         val p = session.project
         when (index) {
             0 -> {
+                timeline.barTicks = p.barTicks
+                timeline.totalTicks = p.lengthTicks()
+                timeline.bindBacking(session.backing)
+                timeline.invalidate()
+            }
+            1 -> {
                 rack.project = p
                 rack.currentPatternIndex = p.currentPattern
                 rack.selectedTrack = p.selectedTrack
                 rack.invalidate()
             }
-            1 -> {
+            2 -> {
                 steps.pattern = p.patternAt(p.currentPattern)
                 steps.trackNames = p.tracks.map { it.name }
                 steps.trackColors = p.tracks.indices.map { Palette.trackColor(it) }
                 steps.invalidate()
             }
-            2 -> {
+            3 -> {
                 piano.pattern = p.patternAt(p.currentPattern)
                 piano.trackIndex = p.selectedTrack
                 piano.invalidate()
             }
-            3 -> {
+            4 -> {
                 playlist.project = p
                 playlist.selectedTrack = p.selectedTrack
                 playlist.invalidate()
             }
-            4 -> {
+            5 -> {
                 mixer.project = p
                 mixer.selectedTrack = p.selectedTrack
                 mixer.invalidate()
             }
-            5 -> auto.invalidate()
+            6 -> auto.invalidate()
         }
     }
 
