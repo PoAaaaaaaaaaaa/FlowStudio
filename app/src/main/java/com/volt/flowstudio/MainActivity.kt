@@ -74,6 +74,51 @@ class MainActivity : Activity() {
         ui.post(ticker)
     }
 
+    /**
+     * 清单声明了 configChanges=orientation|screenSize，旋转不会重建 Activity，
+     * 因此必须自己重算一次布局；否则竖屏切横屏后 chrome 高度还是旧值，
+     * 底栏和内容会再次错位——这是之前"位置不对"的复发性来源。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val dm = resources.displayMetrics
+        val hDp = dm.heightPixels / dm.density
+        keyboardHeight = dp(if (hDp < 700f) 68 else 82)
+        toolBarHeight = dp(if (hDp < 700f) 38 else 42)
+        // 工具栏高度变了，已挂载页面的边距要跟着更新。
+        applyPageMetrics()
+        rootLayout?.requestApplyInsets()
+        tabBar.invalidate()
+        transportBar.invalidate()
+    }
+
+    /** 旋转/尺寸变化后，把每个页面容器里的固定边距重新套一遍。 */
+    private fun applyPageMetrics() {
+        contentView?.let { c ->
+            for (i in 0 until c.childCount) {
+                val page = c.getChildAt(i) as? FrameLayout ?: continue
+                // 只处理确实带工具栏的页；机架页是裸 View，不能套 topMargin。
+                val toolbar = page.getChildAt(0) as? EditorToolbar ?: continue
+                (toolbar.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                    lp.height = toolBarHeight
+                    toolbar.layoutParams = lp
+                }
+                for (j in 1 until page.childCount) {
+                    val child = page.getChildAt(j)
+                    val lp = child.layoutParams as? FrameLayout.LayoutParams ?: continue
+                    lp.topMargin = toolBarHeight
+                    if (child is KeyboardView) {
+                        lp.height = keyboardHeight
+                        lp.gravity = android.view.Gravity.BOTTOM
+                    } else if (child is PianoRollView) {
+                        lp.bottomMargin = keyboardHeight
+                    }
+                    child.layoutParams = lp
+                }
+            }
+        }
+    }
+
     override fun onPause() {
         // 来电、切后台或锁屏都先落盘，避免只等 onDestroy 时丢编辑。
         session.saveNow(sync = false)
@@ -224,10 +269,39 @@ class MainActivity : Activity() {
         layoutChrome()
     }
 
+    /**
+     * 按屏幕真实宽高分配高度。
+     *
+     * 设备是 2560x1600 物理像素 / 400dpi，横屏可用高度只有 640dp。
+     * 之前固定 44+60+26=130dp 的 chrome 会吃掉五分之一屏高，内容显得局促。
+     * 这里改成按屏幕高度比例给，并区分横屏/竖屏三档。
+     */
+    private fun metrics(): Triple<Int, Int, Int> {
+        val dm = resources.displayMetrics
+        val wDp = dm.widthPixels / dm.density
+        val hDp = dm.heightPixels / dm.density
+        val compactLandscape = wDp >= 760f && hDp <= 700f
+        val portrait = hDp > wDp
+        val tabH = dp(
+            when {
+                compactLandscape -> 42
+                portrait -> 48
+                else -> 46
+            }
+        )
+        val transportH = dp(
+            when {
+                compactLandscape -> 62
+                portrait -> 70
+                else -> 66
+            }
+        )
+        val footerH = dp(if (compactLandscape) 24 else 26)
+        return Triple(tabH, transportH, footerH)
+    }
+
     private fun layoutChrome() {
-        val tabH = dp(44)
-        val transportH = dp(60)
-        val footerH = dp(26)
+        val (tabH, transportH, footerH) = metrics()
         val gap = dp(2)
         chromeTop = insetTop + tabH + gap
         chromeBottom = insetBottom + transportH + footerH + gap
@@ -238,27 +312,32 @@ class MainActivity : Activity() {
                 lp.gravity = android.view.Gravity.TOP
                 lp.topMargin = insetTop
                 lp.bottomMargin = 0
+                lp.height = tabH
                 bar.layoutParams = lp
             }
             contentView?.let { c ->
                 val lp = c.layoutParams as FrameLayout.LayoutParams
                 lp.topMargin = chromeTop + bannerExtra
                 lp.bottomMargin = chromeBottom
-                // 左右留白让内容不贴边，宽屏上观感差别很明显。
-                lp.leftMargin = dp(6)
-                lp.rightMargin = dp(6)
+                // 横屏窄边距留给网格，竖屏加大留白避免单列内容贴边。
+                val side = if (resources.configuration.orientation ==
+                    android.content.res.Configuration.ORIENTATION_PORTRAIT) dp(12) else dp(6)
+                lp.leftMargin = side
+                lp.rightMargin = side
                 c.layoutParams = lp
             }
             transportBarView?.let { t ->
                 val lp = t.layoutParams as FrameLayout.LayoutParams
                 lp.gravity = android.view.Gravity.BOTTOM
                 lp.bottomMargin = insetBottom + footerH
+                lp.height = transportH
                 t.layoutParams = lp
             }
             footerBar?.let { f ->
                 val lp = f.layoutParams as FrameLayout.LayoutParams
                 lp.gravity = android.view.Gravity.BOTTOM
                 lp.bottomMargin = insetBottom
+                lp.height = footerH
                 f.layoutParams = lp
             }
             banner?.let { b ->

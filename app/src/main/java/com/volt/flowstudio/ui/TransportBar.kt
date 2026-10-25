@@ -86,9 +86,12 @@ class TransportBar @JvmOverloads constructor(
         if (bottomMode) {
             // 底部控制条做成浮起的圆角卡片，与内容区分层。
             rect(canvas, 0f, 0f, w, h, Palette.BG)
-            rect(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f), Palette.SURFACE, dp(14f))
+            rect(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f), Palette.SURFACE, dp(16f))
+            // 顶部一条极浅高光，让卡片看起来是"浮起"而不是"挖空"。
+            rect(canvas, dp(8f) + dp(14f), dp(4f), w - dp(8f) - dp(14f), dp(5f),
+                Palette.withAlpha(Palette.TEXT, 22), dp(1f))
             outline(canvas, dp(8f), dp(4f), w - dp(8f), h - dp(2f),
-                Palette.withAlpha(Palette.LINE, 170), dp(14f), dp(0.8f))
+                Palette.withAlpha(Palette.LINE, 180), dp(16f), dp(0.8f))
             if (playing) {
                 // 播放中：底部一条缓慢移动的琥珀光，安静但有生命感。
                 // 用三段宽度不同的渐变叠出柔边，避免出现硬切色块。
@@ -116,13 +119,22 @@ class TransportBar @JvmOverloads constructor(
      * 手感比顶部小按钮好得多——播放/停止是最高频操作，应该在拇指能到的地方。
      */
     private fun drawBottom(canvas: Canvas, w: Float, h: Float) {
-        val bh = h - dp(12f)
-        val top = dp(6f)
-        val mainW = dp(54f)
-        val playW = dp(64f)
-        val gap = dp(8f)
+        val bh = h - dp(10f)
+        val top = dp(5f)
+        val mainW = dp(56f)
+        val playW = dp(68f)
+        val gap = dp(10f)
         val groupW = mainW * 3 + playW + gap * 3
-        var gx = ((w - groupW) / 2f).coerceAtLeast(dp(6f))
+
+        // 三段式：左信息 / 中按钮组 / 右工具。
+        // 窄屏必须让位：leftW 归零，按钮组居中，避免文字压到按钮上。
+        val widen = w >= dp(700f)
+        val rightW = if (w > dp(560f)) dp(112f) else dp(58f)
+        val leftW = if (widen) dp(150f) else 0f
+        val centerStart = ((w - groupW) / 2f)
+            .coerceAtLeast(leftW + dp(8f))
+            .coerceAtMost((w - rightW - groupW - dp(8f)).coerceAtLeast(dp(6f)))
+        var gx = centerStart
 
         box(Control.REW, gx, top, mainW, bh)
         drawButton(canvas, Control.REW, Palette.PANEL_HI)
@@ -145,33 +157,32 @@ class TransportBar @JvmOverloads constructor(
         drawButton(canvas, Control.FWD, Palette.PANEL_HI)
         drawSeekIcon(canvas, Control.FWD, backward = false)
 
-        // 左侧：位置 + BPM（按钮组左边界之外才画，防止窄屏互相压住）
-        val bar = positionTicks / barTicks + 1
-        val beat = (positionTicks % barTicks) / Note.PPQ + 1
-        val step = (positionTicks % Note.PPQ) / Note.STEP + 1
-        val leftLimit = boxes.getValue(Control.REW)[0] - dp(10f)
-        if (leftLimit > dp(92f)) {
+        // 左侧：位置 + BPM + 播放态
+        if (widen) {
+            val bar = positionTicks / barTicks + 1
+            val beat = (positionTicks % barTicks) / Note.PPQ + 1
+            val step = (positionTicks % Note.PPQ) / Note.STEP + 1
             label(canvas, String.format("%03d:%02d:%02d", bar, beat, step),
-                dp(14f), h * 0.55f, Palette.CYAN, sp(13f))
-            label(canvas, "${String.format("%.1f", bpm)} BPM", dp(14f), h - dp(5f),
-                Palette.TEXT_DIM, sp(8f))
+                dp(16f), h * 0.52f, Palette.CYAN, sp(15f))
+            val stateText = if (playing) "播放中" else if (positionTicks > 0) "已暂停" else "已停止"
+            val stateColor = if (playing) Palette.GREEN else Palette.TEXT_FAINT
+            label(canvas, stateText, dp(16f), h - dp(8f), stateColor, sp(8.5f), bold = playing)
+            labelRight(canvas, "${String.format("%.1f", bpm)} BPM", dp(146f), h - dp(8f),
+                Palette.TEXT_DIM, sp(8.5f))
         }
 
-        // 右侧：更多 / 导出（窄屏只保留更多）
-        val moreW = dp(46f)
-        val exportW = dp(52f)
-        val rx = w - dp(8f) - moreW
+        // 右侧：更多 / 导出
+        val moreW = dp(48f)
+        val exportW = dp(54f)
+        val rx = w - dp(10f) - moreW
         box(Control.MORE, rx, top, moreW, bh)
         drawButton(canvas, Control.MORE, Palette.PANEL_HI)
         centeredLabel(canvas, Control.MORE, "更多", Palette.TEXT)
-        if (w > dp(520f)) {
+        if (w > dp(560f)) {
             box(Control.EXPORT, rx - dp(6f) - exportW, top, exportW, bh)
             drawButton(canvas, Control.EXPORT, Palette.PANEL_HI)
             centeredLabel(canvas, Control.EXPORT, "导出", Palette.TEXT)
         }
-        // 提示放在按钮组正下方居中，避免与右侧「更多/导出」文字叠在一起。
-        label(canvas, "轻点跳一拍 · 长按跳小节", (w / 2f), h - dp(3f),
-            Palette.TEXT_FAINT, sp(7f), center = true)
     }
 
     /** 顶部信息条：BPM、位置、循环/节拍、保存、更多；播放控制不在这里。 */

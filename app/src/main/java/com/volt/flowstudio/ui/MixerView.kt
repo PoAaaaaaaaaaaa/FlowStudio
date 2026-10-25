@@ -55,15 +55,16 @@ class MixerView @JvmOverloads constructor(
         canvas.drawColor(Palette.BG)
 
         val p = project ?: return
-        masterW = dp(66f)
-        stripW = dp(64f)
+        masterW = dp(78f)
+        // 通道条给一个舒适宽度；放不下就横向滚动，而不是把 7 条挤成一团。
+        stripW = dp(88f)
         val count = p.tracks.size
         val available = w - masterW
         if (count * stripW > available) {
-            stripW = max(dp(44f), available / count.coerceAtMost(6).toFloat())
+            stripW = max(dp(56f), available / count.coerceAtMost(8).toFloat())
         }
 
-        val faderTop = dp(46f)
+        val faderTop = dp(54f)
         val faderBottom = h - dp(58f)
         val faderH = faderBottom - faderTop
 
@@ -227,7 +228,7 @@ class MixerView @JvmOverloads constructor(
         val p = project ?: return false
         val w = width.toFloat()
         val h = height.toFloat()
-        val faderTop = dp(46f)
+        val faderTop = dp(54f)
         val faderBottom = h - dp(58f)
 
         when (e.actionMasked) {

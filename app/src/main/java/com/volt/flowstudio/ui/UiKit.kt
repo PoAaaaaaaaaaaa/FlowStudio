@@ -15,9 +15,11 @@ import kotlin.math.min
 /** 统一视觉系统：低亮石墨底、暖琥珀主色、青色仅用于时间与状态。 */
 object Palette {
     const val BG = 0xFF0B0D12.toInt()
-    const val SURFACE = 0xFF10141C.toInt()
-    const val PANEL = 0xFF151A23.toInt()
-    const val PANEL_HI = 0xFF202633.toInt()
+    const val SURFACE = 0xFF0F131B.toInt()
+    const val PANEL = 0xFF151A24.toInt()
+    const val PANEL_HI = 0xFF1F2634.toInt()
+    /** 卡片顶面：比 PANEL 略亮，用于浮起元素。 */
+    const val CARD = 0xFF1A2029.toInt()
     const val LINE = 0xFF303746.toInt()
     const val LINE_SOFT = 0xFF222936.toInt()
     const val ACCENT = 0xFFFFAD42.toInt()

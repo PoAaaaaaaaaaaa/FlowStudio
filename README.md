@@ -14,6 +14,14 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.17 更新
+
+- 布局按 2560x1600 / 400dpi（横屏 1024x640dp）重新校准：顶栏、内容、底栏按屏幕比例分档。
+- 底栏改三段式：左位置/状态/BPM，中按钮组，右工具；窄屏自动隐藏左区避免重叠。
+- 旋转不再错位：onConfigurationChanged 重算 chrome 与各页边距（清单声明了 configChanges）。
+- 机架名称列上限 230dp；混音台通道条 88dp 并横向滚动，不再把 7 条挤成一团。
+- 配色细化：新增 CARD 中间层，底栏卡片加顶部高光与 16dp 圆角。
+
 ## 1.16 更新
 
 - 布局改为由系统栏 insets 驱动，不再写死 topMargin/bottomMargin。

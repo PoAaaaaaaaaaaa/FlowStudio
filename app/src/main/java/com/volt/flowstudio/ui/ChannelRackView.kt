@@ -94,7 +94,9 @@ class ChannelRackView @JvmOverloads constructor(
         // 列布局：屏宽的分配比例
         colName = w * 0.00f
         val portrait = w < dp(600f)
-        val nameW = if (portrait) max(dp(100f), w * 0.24f) else max(dp(126f), w * 0.21f)
+        // 名称列按比例增长但设上限：2560px/1024dp 宽屏下 21% 会浪费一百多 dp。
+        val nameW = if (portrait) max(dp(100f), w * 0.24f)
+        else max(dp(140f), min(w * 0.26f, dp(230f)))
         colMute = nameW
         colSolo = colMute + dp(if (portrait) 32f else 36f)
         colVol = colSolo + dp(if (portrait) 32f else 36f)
