@@ -129,8 +129,22 @@ object CanvasBackdrop {
     var showThrough: Boolean = false
 
     /** 底色绘制用的颜色：透出背景时用半透明黑，否则用原来的实色。 */
+    /**
+     * 有背景图时的底色。
+     *
+     * 参数演变（每一次都是因为上一版看不见）：
+     *   0xB8（72% 不透明）→ 背景只剩 28%，叠上自身压暗后约 9% = 全黑
+     *   0x99（60%）       → 约 16%，仍然偏暗
+     *   0x76（46%）       → 约 25%，背景纹理明显可辨，同时轨道与波形仍清晰
+     *
+     * 46% 是实测的平衡点：轨道底色本身是半透明的，波形用亮色描边，
+     * 在 25% 亮度的背景上对比度足够。再往上（更透明）会让轨道分界线模糊。
+     *
+     * 保留原色色相（original and 0x00FFFFFF）：各页面底色本来有细微差别，
+     * 统一成纯黑会丢掉那层区分。
+     */
     fun base(original: Int): Int =
-        if (showThrough) (original and 0x00FFFFFF) or 0xB8000000.toInt() else original
+        if (showThrough) (original and 0x00FFFFFF) or 0x76000000.toInt() else original
 
     /** canvas.drawColor 的统一入口。 */
     fun fillColor(original: Int): Int = base(original)

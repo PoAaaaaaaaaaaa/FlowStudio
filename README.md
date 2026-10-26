@@ -14,6 +14,88 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.32 更新
+
+### 1. 「更多」改名为「设置」
+导航栏与走带条上的按钮文字都改成「设置」，与实际打开的内容一致。
+
+### 2. 设置开关全部无效（真因两条）
+
+**真因 A：开关圆钮永远画在"关"的位置。**
+
+`buildRow` 里是先手写 `checked = row.boolValue`，再调 `setChecked(row.boolValue)`。
+而 `setChecked` 开头有一句 `if (checked == v) return` ——
+此时 `checked` 已经是目标值，于是直接返回，**弹簧位置（knobSpring）永远停在初始的 0**。
+结果：`checked` 是 true，圆钮却画在左边。
+
+下次打开设置时，`boolValue` 从 prefs 读到 true，但圆钮又停在 0 ——
+看起来就是"没打开"。这就是反馈里"打开无作用、再打开显示没打开"的完整解释。
+
+修法：`setChecked` 即使在值相同时也要把弹簧位置对齐：
+
+```kotlin
+val wasSame = checked == v
+checked = v
+if (animate && !wasSame) knobSpring.animateTo(target)
+else knobSpring.snapTo(target)   // 首次绑定 / 值未变，直接吸附到正确位置
+```
+
+**真因 B：四个开关只写配置，不做任何实际动作。**
+
+`dimBackground` / `keepAwake` / `metronome` / `showOrnaments` 的 onToggle
+只写了 `settings.xxx = v`，代码里没有任何一处把这些值读回去生效。
+
+新增 `SettingsApplier` 接口，每个开关改变后**立刻调用对应的 apply 动作**：
+
+| 开关 | 实际动作 |
+|---|---|
+| 背景压暗 | 改 `StudioBackground.dim` 并重绘 |
+| 顶部摆件 | 真的 `visibility = VISIBLE/GONE` |
+| 节拍器 | `engine.setMetronome()` + 走带条状态 |
+| 常亮 | 真正 add/clear `FLAG_KEEP_SCREEN_ON` |
+
+同时每个开关都有 `actualXxx()` 回读**真实生效状态**：打开设置时显示的是真实状态
+而不是 prefs 里的值，apply 失败也不会谎报成功。
+
+开关状态机已用独立 Kotlin 程序验过 5 个场景（含两个旧代码会失败的），全部正确。
+
+### 3. 自定义背景图依旧无效（真因三层，逐层算过数）
+
+拿一张中等灰（128/255 = 50%）的图，把整条处理链的乘法算出来：
+
+| 处理层 | 上一版参数 | 结果亮度 |
+|---|---|---|
+| 原图 | — | 50% |
+| ColorMatrix 压暗 | contrast 0.72, offset 26 | 46% |
+| 顶部渐变压暗 | 0xB4（71%） | 14% |
+| 底部渐变压暗 | 0xCC（80%） | 9% |
+| 背景层二次压暗 | 0x4A（29%） | 约 7% |
+| **内容区不透明底** | **0xB8（72%）** | **约 9%（全黑）** |
+
+**每一层单看都"合理"，乘起来就是全黑。** 这就是为什么设置提示成功、图也确实存下来了，
+但屏幕上什么也看不到。
+
+修正后的参数（目标：内容区外能看到接近原图，内容区内能透出纹理）：
+
+| 处理层 | 新参数 | 说明 |
+|---|---|---|
+| 去饱和 | 0.60 | 保留照片感，不再灰成一片 |
+| 压暗 | contrast 1.0 / offset 0 | 完全不压。这是关键决定 |
+| 顶部渐变 | 0x3D（24%） | chrome 区能看清字即可 |
+| 底部渐变 | 0x55（33%） | 同上 |
+| 背景层二次压暗 | 0x14（8%） | 只作轻微统一 |
+| 内容区底 | **0x76（46%）** | 实测平衡点 |
+
+**职责重新划分**：背景图保持接近原图的亮度（用户选它就是因为它好看），
+压暗的责任交给内容区自己的半透明底 —— 只压内容区，页面边缘与 chrome 保持原貌。
+
+实测验证：造了一张 1440×2560 的测试图（渐变天空 + 两个亮色块），
+用 Python 精确复现 Android 的 ColorMatrix 与各层 alpha 合成，
+最终屏幕亮度从 **9% 提到 25.9%**，渐变色带与色块都清晰可辨。
+
+另外补了两处漏掉 `CanvasBackdrop` 的视图：`StepSequencerView` 与 `AutomationView`
+（它们仍在画不透明底，会盖掉背景）。
+
 ## 1.31.1 更新（启动闪退修复）
 
 **问题**：装上 1.31 后一进软件就闪退。

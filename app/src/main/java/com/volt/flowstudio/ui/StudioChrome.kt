@@ -80,9 +80,13 @@ class StudioBackground @JvmOverloads constructor(
         if (bmp != null && !bmp.isRecycled) {
             if (imgMatrix.isIdentity) rebuildMatrix()
             canvas.drawBitmap(bmp, imgMatrix, imgPaint)
-            // 二次压暗：设置里关掉"背景压暗"时仍保留一个很轻的下限，
-            // 否则某些亮背景会把网格与内容吃掉。
-            dimPaint.color = if (dim) 0x4A000000 else 0x1C000000
+            // 二次压暗。
+            //
+            // 图片本身在 AppSettings 里已经压过一轮，这里不该再压一次重的 ——
+            // 原来这里是 0x4A（29%），叠在前一轮之后把背景又暗掉近三成。
+            // 现在只在"背景压暗"开启时给 12%，关闭时几乎不压（5%），
+            // 并把保证可读性的责任交给上方内容区的半透明底。
+            dimPaint.color = if (dim) 0x14000000 else 0x08000000
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
         } else {
             b.fill.shader = shader

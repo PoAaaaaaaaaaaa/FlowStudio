@@ -169,7 +169,7 @@ class TransportBar @JvmOverloads constructor(
         val rx = w - dp(10f) - moreW
         box(Control.MORE, rx, top, moreW, bh)
         drawButton(canvas, Control.MORE, Palette.PANEL_HI)
-        centeredLabel(canvas, Control.MORE, "更多", Palette.TEXT)
+        centeredLabel(canvas, Control.MORE, "设置", Palette.TEXT)
         if (w > dp(560f)) {
             box(Control.EXPORT, rx - dp(6f) - exportW, top, exportW, bh)
             drawButton(canvas, Control.EXPORT, Palette.PANEL_HI)
@@ -217,7 +217,7 @@ class TransportBar @JvmOverloads constructor(
         val rx = w - dp(8f) - moreW
         box(Control.MORE, rx, top, moreW, bh)
         drawButton(canvas, Control.MORE, Palette.PANEL_HI)
-        centeredLabel(canvas, Control.MORE, "更多", Palette.TEXT)
+        centeredLabel(canvas, Control.MORE, "设置", Palette.TEXT)
         if (w > dp(600f)) {
             box(Control.SAVE, rx - dp(6f) - dp(48f), top, dp(48f), bh)
             drawButton(canvas, Control.SAVE, Palette.PANEL_HI)

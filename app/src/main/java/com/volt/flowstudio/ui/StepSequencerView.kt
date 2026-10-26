@@ -53,7 +53,7 @@ class StepSequencerView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
 
-        canvas.drawColor(Palette.BG)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         if (pat == null) {
             label(canvas, "没有样式", dp(12f), h / 2, Palette.TEXT_DIM, sp(13f))

@@ -114,7 +114,7 @@ class AppSettings(context: Context) {
             val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
             val cm = android.graphics.ColorMatrix()
             // 亮度权重（人眼感知）：R .213 G .715 B .072
-            val sat = 0.18f
+            val sat = 0.60f
             val inv = 1f - sat
             val r = 0.213f * inv
             val g = 0.715f * inv
@@ -125,9 +125,19 @@ class AppSettings(context: Context) {
                 r, g, b + sat, 0f, 0f,
                 0f, 0f, 0f, 1f, 0f,
             ))
-            // 再压亮度与对比：contrast 0.72，brightness 加上后整体落在 0.14-0.30
-            val contrast = 0.72f
-            val offset = 26f
+            // 这里**几乎不压暗**。
+            //
+            // 走过的弯路：一开始用 contrast 0.72 + offset 26，再叠上下渐变、
+            // 背景层二次压暗、内容区 72% 不透明底 —— 中间乘下来只剩 9% 亮度，
+            // 用户看到的就是一片黑，所以"设置成功但没效果"。
+            //
+            // 正确的职责划分：
+            //   背景图 = 保持接近原图的亮度（用户选它就是因为它好看）
+            //   压暗   = 由内容区自己的半透明底去做，只压内容区
+            // 这样内容区外（顶栏、走带条、页面边缘）能看到接近原图的画面，
+            // 内容区里也能透出纹理。
+            val contrast = 1.0f
+            val offset = 0f
             val dark = android.graphics.ColorMatrix(floatArrayOf(
                 contrast, 0f, 0f, 0f, offset,
                 0f, contrast, 0f, 0f, offset,
@@ -141,29 +151,30 @@ class AppSettings(context: Context) {
             val dstRect = android.graphics.Rect(0, 0, TARGET_W, TARGET_H)
             c.drawBitmap(src, srcRect, dstRect, paint)
 
-            // 5) 上下的额外压暗：chrome 区域（导航栏、走带条）压得更狠
+            // 5) 上下的额外压暗：chrome 区域（导航栏、走带条）需要压一点才看得清字，
+            //    但 71% 会把那片压成纯黑，用户以为图没生效。40% 足够。
             val topGrad = LinearGradient(
-                0f, 0f, 0f, TARGET_H * 0.22f,
-                intArrayOf(0xB4000000.toInt(), 0x00000000),
+                0f, 0f, 0f, TARGET_H * 0.18f,
+                intArrayOf(0x3D000000, 0x00000000),
                 null, Shader.TileMode.CLAMP
             )
             paint.reset()
             paint.isAntiAlias = true
             paint.shader = topGrad
-            c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H * 0.22f, paint)
+            c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H * 0.18f, paint)
 
             val botGrad = LinearGradient(
-                0f, TARGET_H * 0.70f, 0f, TARGET_H.toFloat(),
-                intArrayOf(0x00000000, 0xCC000000.toInt()),
+                0f, TARGET_H * 0.76f, 0f, TARGET_H.toFloat(),
+                intArrayOf(0x00000000, 0x55000000),
                 null, Shader.TileMode.CLAMP
             )
             paint.shader = botGrad
-            c.drawRect(0f, TARGET_H * 0.70f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
+            c.drawRect(0f, TARGET_H * 0.76f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
 
             // 6) 主题色染色：极淡，只为了让背景与软件同源
             paint.shader = null
             paint.colorFilter = PorterDuffColorFilter(
-                com.volt.flowstudio.ui.Palette.withAlpha(com.volt.flowstudio.ui.Palette.ACCENT, 18),
+                com.volt.flowstudio.ui.Palette.withAlpha(com.volt.flowstudio.ui.Palette.ACCENT, 15),
                 PorterDuff.Mode.SRC_OVER
             )
             c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
@@ -172,7 +183,7 @@ class AppSettings(context: Context) {
             paint.colorFilter = null
             val glow = RadialGradient(
                 TARGET_W * 0.78f, TARGET_H * 0.16f, TARGET_W * 0.62f,
-                intArrayOf(0x14FFFFFF, 0x00FFFFFF),
+                intArrayOf(0x1EFFFFFF, 0x00FFFFFF),
                 null, Shader.TileMode.CLAMP
             )
             paint.shader = glow

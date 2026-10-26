@@ -42,7 +42,7 @@ class AutomationView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.PANEL)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.PANEL))
 
         val p = project ?: return
         val padL = dp(30f)

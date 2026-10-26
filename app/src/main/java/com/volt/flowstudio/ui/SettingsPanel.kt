@@ -254,10 +254,24 @@ class GlassToggle @JvmOverloads constructor(
         isFocusable = true
     }
 
+    /**
+     * 设置状态。
+     *
+     * 注意：**即使 checked 已经是同一个值，也要把弹簧位置对齐**。
+     * 旧实现在值相同时直接 return，而 buildRow 是"先手写 checked 再调 setChecked"，
+     * 于是弹簧永远停在初始值 0（关闭位置）—— 圆钮画在左边，但 checked 是 true。
+     * 表现就是"打开没反应、下次打开又显示没打开"。
+     */
     fun setChecked(v: Boolean, animate: Boolean = true) {
-        if (checked == v) return
+        val wasSame = checked == v
         checked = v
-        if (animate) knobSpring.animateTo(if (v) 1f else 0f) else knobSpring.snapTo(if (v) 1f else 0f)
+        val target = if (v) 1f else 0f
+        // 值没变但弹簧位置不对（首次绑定），也要对齐
+        if (animate && !wasSame) {
+            knobSpring.animateTo(target)
+        } else if (!animate || wasSame) {
+            knobSpring.snapTo(target)
+        }
         invalidate()
     }
 
@@ -598,7 +612,7 @@ class SettingsPanel(
             when (row.kind) {
                 SettingKind.TOGGLE -> (v as? GlassToggle)?.setChecked(row.boolValue)
                 SettingKind.VALUE -> row.onValueText?.let { f ->
-                    (v as? android.widget.TextView)?.text = f()  // 值文本行
+                    (v as? android.widget.TextView)?.text = f()
                 }
                 else -> {}
             }
@@ -622,7 +636,7 @@ class SettingsPanel(
             SettingKind.TOGGLE -> {
                 val box = rowShell(row)
                 val t = GlassToggle(context).apply {
-                    checked = row.boolValue
+                    // 不要先手写 checked：那会让 setChecked 认为"值没变"而跳过弹簧对齐
                     setChecked(row.boolValue, false)
                     onToggle = { v ->
                         row.boolValue = v
@@ -732,9 +746,30 @@ class SettingsPanel(
  * 独立成一个类而不是塞进 MainActivity：设置项会持续增长，
  * 挂在 Activity 里很快就会变成一团。这里只依赖 Context 与回调。
  */
+/**
+ * 设置的"实际应用"回调。
+ *
+ * 为什么要有它：1.31 的设置面板只把值写进 SharedPreferences，
+ * 没有任何一处把它读回去生效 —— 于是"打开开关"什么都不会发生。
+ * 每个开关必须在改变后立刻调用对应的 apply 动作，
+ * 并**重新读回真实状态**来刷新界面（而不是相信刚才点的那个值）。
+ */
+interface SettingsApplier {
+    fun applyDimBackground(value: Boolean)
+    fun applyOrnaments(value: Boolean)
+    fun applyMetronome(value: Boolean)
+    fun applyKeepAwake(value: Boolean)
+    /** 重新读回某项的真实状态，用于把界面同步成实际生效的样子。 */
+    fun actualDimBackground(): Boolean
+    fun actualOrnaments(): Boolean
+    fun actualMetronome(): Boolean
+    fun actualKeepAwake(): Boolean
+}
+
 class SettingsWindow(
     private val context: Context,
     private val settings: com.volt.flowstudio.session.AppSettings,
+    private val applier: SettingsApplier,
     private val onPickBackground: () -> Unit,
     private val onShowDiagnostics: () -> Unit,
     private val onShowGuide: () -> Unit,
@@ -770,29 +805,42 @@ class SettingsWindow(
                     title = "背景压暗",
                     subtitle = "让工程内容始终清晰可读",
                     kind = SettingKind.TOGGLE,
-                    boolValue = settings.dimBackground,
-                    onToggle = { v -> settings.dimBackground = v; settings.save(); onNotify("背景压暗 ${if (v) "开" else "关"}") },
+                    boolValue = applier.actualDimBackground(),
+                    onToggle = { v ->
+                        settings.dimBackground = v
+                        applier.applyDimBackground(v)
+                        onNotify("背景压暗 ${if (applier.actualDimBackground()) "开" else "关"}")
+                    },
                 ),
                 SettingRow(
                     title = "顶部摆件",
                     subtitle = "电平、卷盘与唱针动画",
                     kind = SettingKind.TOGGLE,
-                    boolValue = settings.showOrnaments,
-                    onToggle = { v -> settings.showOrnaments = v; settings.save() },
+                    boolValue = applier.actualOrnaments(),
+                    onToggle = { v ->
+                        settings.showOrnaments = v
+                        applier.applyOrnaments(v)
+                    },
                 ),
             ),
             "播放" to listOf(
                 SettingRow(
                     title = "节拍器",
                     kind = SettingKind.TOGGLE,
-                    boolValue = settings.metronome,
-                    onToggle = { v -> settings.metronome = v; settings.save() },
+                    boolValue = applier.actualMetronome(),
+                    onToggle = { v ->
+                        settings.metronome = v
+                        applier.applyMetronome(v)
+                    },
                 ),
                 SettingRow(
                     title = "播放时保持屏幕常亮",
                     kind = SettingKind.TOGGLE,
-                    boolValue = settings.keepAwake,
-                    onToggle = { v -> settings.keepAwake = v; settings.save() },
+                    boolValue = applier.actualKeepAwake(),
+                    onToggle = { v ->
+                        settings.keepAwake = v
+                        applier.applyKeepAwake(v)
+                    },
                 ),
             ),
             "工程" to listOf(

@@ -1292,15 +1292,67 @@ class MainActivity : Activity() {
             settingsWindow = com.volt.flowstudio.ui.SettingsWindow(
                 this,
                 settings,
+                applier = settingsApplier,
                 onPickBackground = { pickBackgroundImage() },
                 onShowDiagnostics = { showDiagnostics() },
                 onShowGuide = { showGestureGuide() },
                 onShowDj = { showDjKnowledge() },
                 onExport = { showExportDialog() },
-                onNotify = { msg -> toast(msg); applyOrnamentVisibility() },
+                onNotify = { msg -> toast(msg) },
             )
         }
         settingsWindow?.show()
+    }
+
+    /**
+     * 设置的"实际生效"实现。
+     *
+     * 之前设置面板只把值写进 SharedPreferences，没有任何一处读回去应用 ——
+     * 所以"打开选项什么都不会发生，再打开又显示没打开"（界面重建时读的是
+     * prefs 里的新值，但生效的仍是旧行为，看起来就像没打开）。
+     *
+     * 这里每个 apply 都必须真的动到运行中的对象；每个 actual 都必须读回
+     * **真实状态**而不是 prefs —— 如果 apply 没成功，界面就该显示真实值。
+     */
+    private val settingsApplier = object : com.volt.flowstudio.ui.SettingsApplier {
+
+        override fun applyDimBackground(value: Boolean) {
+            backgroundView?.let {
+                it.dim = value
+                it.invalidate()
+            }
+        }
+
+        override fun applyOrnaments(value: Boolean) {
+            applyOrnamentVisibility()
+        }
+
+        override fun applyMetronome(value: Boolean) {
+            // 节拍器是运行中的引擎状态，不是纯设置
+            runCatching {
+                session.engine.setMetronome(value)
+                transportBar.setMetronome(value)
+            }
+        }
+
+        override fun applyKeepAwake(value: Boolean) {
+            // 直接按传入值改 window flag，不绕道 settings ——
+            // 避免"先写 settings 再读回来"的两步之间出现不一致
+            if (value) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+
+        // ---- 回读真实状态 ----
+        override fun actualDimBackground(): Boolean = backgroundView?.dim ?: settings.dimBackground
+        // ornament 为 null 说明界面还没建（不该发生，但别让它把状态说反了）。
+        // 有视图时以视图为准，没有时以设置为准。
+        override fun actualOrnaments(): Boolean =
+            ornament?.let { it.visibility == View.VISIBLE } ?: settings.showOrnaments
+        override fun actualMetronome(): Boolean = transportBar.metronomeOn
+        override fun actualKeepAwake(): Boolean = settings.keepAwake
     }
 
     /** 系统图片选择器：只取图片，不限定来源（相册、文件管理器都行）。 */
