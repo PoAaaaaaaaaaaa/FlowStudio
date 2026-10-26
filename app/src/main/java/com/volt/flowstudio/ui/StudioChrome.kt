@@ -22,6 +22,30 @@ class StudioBackground @JvmOverloads constructor(
 ) : BaseView(context, attrs) {
     private var shader: LinearGradient? = null
 
+    /**
+     * 用户自定义背景图（已经过 AppSettings 处理：去饱和、压暗、带渐变压边）。
+     *
+     * 它只画在这一层 —— 这一层是内容区所有 View 的最底层，
+     * 上层的轨道、片段、推子各自有实心底色，所以换背景绝不会影响
+     * 音频轨道与波形区域的可读性。这是"背景不改变轨道 UI"的实现方式。
+     */
+    var backgroundImage: android.graphics.Bitmap? = null
+        set(value) {
+            if (field === value) return
+            field = value
+            rebuildMatrix()
+            invalidate()
+        }
+
+    /** 背景图额外压暗（用户可在设置里关掉）。 */
+    var dim = true
+        set(value) { if (field != value) { field = value; invalidate() } }
+
+    private val imgMatrix = android.graphics.Matrix()
+    private val imgPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or
+        android.graphics.Paint.FILTER_BITMAP_FLAG)
+    private val dimPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         // 从左上到右下的极缓渐变：让大面积暗色有个光源方向，
         // 不至于像一块死板的纯色板。幅度只有 3-4 个色阶，几乎察觉不到。
@@ -30,17 +54,48 @@ class StudioBackground @JvmOverloads constructor(
             intArrayOf(0xFF12151A.toInt(), Palette.BG, 0xFF0A0C0F.toInt()),
             floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP
         )
+        rebuildMatrix()
+    }
+
+    /**
+     * 背景图铺满策略：等比例放大到覆盖整块画布（cover），居中。
+     * 不做拉伸 —— 拉伸会让照片里的人脸变形，观感立刻廉价。
+     */
+    private fun rebuildMatrix() {
+        val bmp = backgroundImage ?: return
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val sx = w / bmp.width
+        val sy = h / bmp.height
+        val s = maxOf(sx, sy)
+        val dx = (w - bmp.width * s) * 0.5f
+        val dy = (h - bmp.height * s) * 0.5f
+        imgMatrix.setScale(s, s)
+        imgMatrix.postTranslate(dx, dy)
     }
 
     override fun onDraw(canvas: Canvas) {
-        b.fill.shader = shader
-        b.fill.style = android.graphics.Paint.Style.FILL
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), b.fill)
-        b.fill.shader = null
+        val bmp = backgroundImage
+        if (bmp != null && !bmp.isRecycled) {
+            if (imgMatrix.isIdentity) rebuildMatrix()
+            canvas.drawBitmap(bmp, imgMatrix, imgPaint)
+            // 二次压暗：设置里关掉"背景压暗"时仍保留一个很轻的下限，
+            // 否则某些亮背景会把网格与内容吃掉。
+            dimPaint.color = if (dim) 0x4A000000 else 0x1C000000
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+        } else {
+            b.fill.shader = shader
+            b.fill.style = android.graphics.Paint.Style.FILL
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), b.fill)
+            b.fill.shader = null
+        }
+
         // 极淡的网格：给大面积暗色一点"工作台"的质感，不抢内容。
+        // 有背景图时把网格再淡一半 —— 照片上叠满网格会很脏。
         val step = dp(32f)
         if (step <= 0f) return
-        b.stroke.color = Palette.withAlpha(Palette.LINE, 12)
+        b.stroke.color = Palette.withAlpha(Palette.LINE, if (bmp != null) 7 else 12)
         b.stroke.strokeWidth = dp(0.5f)
         var x = 0f
         while (x < width) {

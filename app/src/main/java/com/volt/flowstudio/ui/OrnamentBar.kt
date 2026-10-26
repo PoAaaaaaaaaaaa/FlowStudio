@@ -133,6 +133,19 @@ class OrnamentBar @JvmOverloads constructor(
             canvas.drawPath(path, b.stroke)
         }
 
+        // ------------------------------------------------------------------ 脉冲点阵
+        // 四颗小圆点代表四拍，当前拍最亮并向两侧扩散。
+        // 这是 DAW 里最省地方又能一眼看出"在第几拍"的元件。
+        val dotRight = reelL1 - dp(16f)
+        val dotGap = dp(5.4f)
+        val dotR = dp(1.6f)
+        drawBeatDots(canvas, dotRight, cy - h * 0.13f, dotGap, dotR)
+
+        // ------------------------------------------------------------------ 频谱
+        // 极窄的三段频谱（低/中/高），高度跟主输出电平相关。
+        // 不做真 FFT：这一层是装饰，实频谱在混音台页面里有。
+        drawMiniSpectrum(canvas, dotRight - dotGap * 3.6f - dp(9f), cy, h)
+
         // ------------------------------------------------------------------ 唱针
         val armRight = reelL1 - dp(14f)
         val armLen = (h * 0.52f).coerceIn(dp(6f), dp(15f))
@@ -258,12 +271,51 @@ class OrnamentBar @JvmOverloads constructor(
         b.stroke.strokeCap = Paint.Cap.BUTT
     }
 
+    /** 四拍点阵：当前拍实心高亮，其余渐暗；播放时整体有轻微呼吸。 */
+    private fun drawBeatDots(canvas: Canvas, rightX: Float, y: Float, gap: Float, r: Float) {
+        val cur = (beatIndex % 4).coerceIn(0, 3)
+        for (k in 0 until 4) {
+            val cx = rightX - (3 - k) * gap
+            val isCur = k == cur && playing
+            val baseA = if (isCur) 235 else 70
+            // 脉冲让当前拍那一颗略大
+            val rr = if (isCur) r * (1f + beatPulse * 0.55f) else r
+            b.fill.color = Palette.withAlpha(if (isCur) Palette.ACCENT else Palette.TEXT_FAINT, baseA)
+            b.fill.style = Paint.Style.FILL
+            canvas.drawCircle(cx, y, rr, b.fill)
+        }
+    }
+
+    /** 三段迷你频谱：低频最粗、高频最细，高度随电平起伏。 */
+    private fun drawMiniSpectrum(canvas: Canvas, rightX: Float, cy: Float, h: Float) {
+        val barW = dp(1.7f)
+        val gap = dp(1.9f)
+        val maxH = h * 0.22f
+        val lv = listOf(peakL * 1.05f, (peakL + peakR) * 0.44f, peakR * 0.82f)
+        for (k in 0 until 3) {
+            val x = rightX - (2 - k) * (barW + gap)
+            val v = lv[k].coerceIn(0f, 1f)
+            // 底部对齐，高度至少留 1.2dp 让"有这条"可见
+            val bh = (maxH * v).coerceAtLeast(dp(1.2f))
+            val col = when {
+                v > 0.9f -> Palette.RED
+                v > 0.68f -> Palette.YELLOW
+                else -> Palette.ACCENT
+            }
+            rect(canvas, x, cy + dp(2f) - bh, x + barW, cy + dp(2f),
+                Palette.withAlpha(col, 200), barW * 0.5f)
+        }
+    }
+
+    /** 当前是第几拍（由 ticker 喂），用于四拍点阵。 */
+    var beatIndex = 0
+
     /**
      * 只有播放中、或电平还在变的时候才持续刷新。
      * 静止时不请求下一帧 —— 装饰不该在没人看的时候烧 CPU。
      */
     fun needsAnimation(): Boolean =
-        playing || peakL > 0.004f || peakR > 0.004f ||
+        playing || beatPulse > 0.01f || peakL > 0.004f || peakR > 0.004f ||
             peakHoldL[0] > 0.02f || peakHoldR[0] > 0.02f ||
             abs(armAngle - (if (playing) ARM_PLAY else ARM_REST)) > 0.01f
 }

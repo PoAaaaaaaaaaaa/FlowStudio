@@ -53,6 +53,7 @@ class MainActivity : Activity() {
     private var bannerHeight = 0
     private val REQ_PICK_AUDIO = 4101
     private val REQ_MEDIA_PERM = 4102
+    private val REQ_PICK_BACKGROUND = 4103
     private var columnLayout: android.widget.LinearLayout? = null
     private var navBar: android.widget.LinearLayout? = null
     private var navMenuButton: FlowButton? = null
@@ -61,6 +62,12 @@ class MainActivity : Activity() {
     private var navProgress: TextView? = null
     /** 导航栏右侧的装饰条：电平 + 卷盘 + 唱针。见 OrnamentBar。 */
     private var ornament: com.volt.flowstudio.ui.OrnamentBar? = null
+    /** 应用设置（背景图、摆件、常亮等）。与工程无关，独立持久化。 */
+    private lateinit var settings: com.volt.flowstudio.session.AppSettings
+    private var backgroundView: com.volt.flowstudio.ui.StudioBackground? = null
+    private var settingsWindow: com.volt.flowstudio.ui.SettingsWindow? = null
+    /** 摆件四拍点阵：上一次的拍号，用来检测"进新拍" */
+    private var lastOrnamentBeat = -1
     private var navSheet: android.app.Dialog? = null
     private val tabTitles = listOf("编排", "机架", "卷帘", "混音")
     private val tabHints = listOf(
@@ -80,6 +87,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         session = (application as FlowApp).session
+        settings = com.volt.flowstudio.session.AppSettings(this)
+        applyKeepAwake()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         buildUi()
@@ -232,7 +241,10 @@ class MainActivity : Activity() {
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
 
         val root = FrameLayout(this).apply { setBackgroundColor(Palette.BG) }
-        root.addView(StudioBackground(this), matchParams())
+        val bg = StudioBackground(this)
+        backgroundView = bg
+        root.addView(bg, matchParams())
+        applyBackground()
 
         val column = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -300,9 +312,11 @@ class MainActivity : Activity() {
         // 既填了空白又能扫一眼看到有没有声音。不接受触摸，不会误触。
         val deco = com.volt.flowstudio.ui.OrnamentBar(this)
         ornament = deco
+        // 加宽以容纳新增的四拍点阵与迷你频谱。窄屏 128、宽屏 156。
         bar.addView(deco, android.widget.LinearLayout.LayoutParams(
-            dp(if (portrait) 96 else 118), android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+            dp(if (portrait) 128 else 156), android.widget.LinearLayout.LayoutParams.MATCH_PARENT
         ))
+        deco.visibility = if (settings.showOrnaments) View.VISIBLE else View.GONE
 
         // 右侧页码：让人知道自己在整个工作流的哪个位置
         navProgress = TextView(this).apply {
@@ -864,6 +878,17 @@ class MainActivity : Activity() {
             o.peakL = pk.getOrElse(0) { 0f }
             o.peakR = pk.getOrElse(1) { 0f }
             o.playing = session.isPlaying()
+            // 当前拍：四拍点阵与脉冲用它
+            val barTicks = session.project.barTicks.coerceAtLeast(1)
+            val beatTicks = barTicks / 4
+            o.beatIndex = if (beatTicks > 0) (pos % barTicks) / beatTicks else 0
+            // 进到新的一拍时给一个脉冲（由 OrnamentBar 自己衰减）
+            if (session.isPlaying() && o.beatIndex != lastOrnamentBeat) {
+                lastOrnamentBeat = o.beatIndex
+                o.beatPulse = 1f
+            } else {
+                o.beatPulse = (o.beatPulse - 0.08f).coerceAtLeast(0f)
+            }
         }
         transportBar.positionTicks = pos
         transportBar.barTicks = session.project.barTicks
@@ -1006,6 +1031,16 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        // 背景图：单独一条路径，与音频导入完全分开
+        if (requestCode == REQ_PICK_BACKGROUND) {
+            if (resultCode == RESULT_OK) {
+                val uri = data?.data ?: data?.clipData?.getItemAt(0)?.uri
+                if (uri != null) handleBackgroundResult(uri)
+            }
+            return
+        }
+
         if (requestCode != REQ_PICK_AUDIO || resultCode != RESULT_OK) return
 
         // 支持一次选多个：编曲常常是一整套鼓组 + 人声 + 乐器分轨一起进来。
@@ -1137,39 +1172,91 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * 设置窗口。
+     *
+     * 原来这里是「更多控制」的 AlertDialog 列表，九项里混着三类东西：
+     *   1. 用户真的要用的（导入音频、节拍器、导出）
+     *   2. 日常高频但该有专门入口的（工程管理、保存、撤销）
+     *   3. 诊断信息、操作指南这类"出问题时才看"的
+     * 全塞在一个系统列表里，用户找不到东西，开发者选项还占着前排。
+     *
+     * 现在：分组卡片式设置窗口（外观 / 播放 / 工程 / 诊断），
+     * 高频操作留在工具栏与导航抽屉，诊断降到最后一组。
+     */
     private fun showMoreDialog() {
-        val items = arrayOf(
-            "工程…（新建 / 打开 / 删除）",
-            "保存工程",
-            "导入音频…",
-            "按曲风起步…",
-            "节拍器 ${if (transportBar.metronomeOn) "· 开" else "· 关"}",
-            "摇摆 / Swing",
-            "DJ 与混音知识",
-            "操作指南",
-            "撤销 AI 最近一次编辑"
-        )
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("更多控制")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> showProjectDialog()
-                    1 -> transportBar.onSave?.invoke()
-                    2 -> pickAudio()
-                    3 -> showGenrePicker()
-                    4 -> transportBar.onMetronomeToggle?.invoke(!transportBar.metronomeOn)
-                    5 -> showSwingDialog()
-                    6 -> showDjKnowledge()
-                    7 -> showGestureGuide()
-                    8 -> {
-                        val ok = session.undoExternalEdit()
-                        toast(if (ok) "已撤销 AI 的改动" else "没有可撤销的 AI 编辑")
-                        refreshAll(session.project)
-                    }
+        if (settingsWindow == null) {
+            settingsWindow = com.volt.flowstudio.ui.SettingsWindow(
+                this,
+                settings,
+                onPickBackground = { pickBackgroundImage() },
+                onShowDiagnostics = { showDiagnostics() },
+                onShowGuide = { showGestureGuide() },
+                onShowDj = { showDjKnowledge() },
+                onExport = { showExportDialog() },
+                onNotify = { msg -> toast(msg); applyOrnamentVisibility() },
+            )
+        }
+        settingsWindow?.show()
+    }
+
+    /** 系统图片选择器：只取图片，不限定来源（相册、文件管理器都行）。 */
+    private fun pickBackgroundImage() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+            type = "image/*"
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+        }
+        runCatching { startActivityForResult(intent, REQ_PICK_BACKGROUND) }
+            .onFailure { toast("这台设备没有可用的图片选择器") }
+    }
+
+    /**
+     * 处理选中的背景图：解码 → 交给 AppSettings 做去饱和/压暗/加渐变压边 → 落盘 → 应用。
+     *
+     * 全过程在后台线程做（大图解码 + 两次缩放，主线程做会卡住 UI 几百毫秒），
+     * 完成后回主线程换图。
+     */
+    private fun handleBackgroundResult(uri: android.net.Uri) {
+        toast("正在处理背景图…")
+        Thread {
+            val path = runCatching {
+                val src = contentResolver.openInputStream(uri)?.use { input ->
+                    android.graphics.BitmapFactory.decodeStream(input)
+                } ?: return@runCatching null
+                com.volt.flowstudio.session.AppSettings.importBackground(src, cacheDir)
+            }.getOrNull()
+
+            ui.post(Runnable {
+                if (path == null) {
+                    toast("这张图读不出来，换一张试试")
+                    return@Runnable
                 }
-            }
-            .setNegativeButton("关闭", null)
-            .show()
+                settings.backgroundPath = path
+                applyBackground()
+                settingsWindow?.dismiss()
+                settingsWindow = null
+                toast("背景已应用")
+            })
+        }.start()
+    }
+
+    /** 把设置里的背景图贴到底层 StudioBackground。没有就回到默认渐变。 */
+    private fun applyBackground() {
+        val bg = backgroundView ?: return
+        bg.dim = settings.dimBackground
+        bg.backgroundImage = settings.loadBackground()
+    }
+
+    private fun applyKeepAwake() {
+        if (settings.keepAwake) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun applyOrnamentVisibility() {
+        ornament?.visibility = if (settings.showOrnaments) View.VISIBLE else View.GONE
     }
 
     /** 手机端也能查的 DJ / 混音要点；与插件 flowstudio_dj 同源知识。 */

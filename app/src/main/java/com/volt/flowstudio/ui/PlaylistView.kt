@@ -392,19 +392,33 @@ class PlaylistView @JvmOverloads constructor(
         val toFrac = ((clip.offset + clip.length).toFloat() / totalTicks).coerceIn(0f, 1f)
         val span = (toFrac - fromFrac).coerceAtLeast(0.001f)
 
-        val cols = (r - l).toInt().coerceIn(1, 900)
+        // 波形必须横跨整个片段的可见宽度。
+        //
+        // 旧实现把列数钳在 900 并把 x 写成 l + c —— 于是片段宽于 900px 时
+        // 波形只画到左边 900 像素就没内容了，缩放放大后看起来"波形没跟上"。
+        // 真正的原因是绘制范围被截断，不是峰值数据不够。
+        val pxWidth = (r - l).coerceAtLeast(1f)
+        // 每根柱子 1.4px 宽（含 0.4px 缝），放大到很近时也不过密
+        val step = 1.4f
+        val cols = (pxWidth / step).toInt().coerceIn(1, 4000)
         b.fill.style = Paint.Style.FILL
         b.fill.color = Palette.withAlpha(Palette.AUDIO, 235)
+
+        // 片段的左裁剪（offset）也要跟着走，否则缩放后波形与内容错位
         for (c in 0 until cols) {
-            val frac = fromFrac + span * (c.toFloat() / cols)
+            val t = c.toFloat() / cols
+            val frac = fromFrac + span * t
             val idx = (frac * (peaks.size - 1)).toInt().coerceIn(0, peaks.size - 1)
             val amp = peaks[idx].coerceIn(0f, 1f) * half
-            if (amp < 0.4f) continue
-            val x = l + c
-            canvas.drawRect(x, mid - amp, x + 1f, mid + amp, b.fill)
+            // 极小的振幅也要画：否则安静段落会变成一条空白，
+            // 看起来像"这段没内容"。给一个 0.5px 的下限。
+            val a = if (amp < 0.5f) 0.5f else amp
+            val x = l + pxWidth * t
+            canvas.drawRect(x, mid - a, x + step - 0.4f, mid + a, b.fill)
         }
-        line(canvas, l + dp(2f), mid, r - dp(2f), mid,
-            Palette.withAlpha(Palette.BG, 90), dp(0.8f))
+        // 中线压在波形上面：标准 DAW 的观感
+        line(canvas, l + dp(2f), mid, maxOf(l + dp(2f), r - dp(2f)), mid,
+            Palette.withAlpha(Palette.BG, 110), dp(0.8f))
     }
 
     /**

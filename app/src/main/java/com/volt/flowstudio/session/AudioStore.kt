@@ -135,9 +135,20 @@ class AudioStore(private val context: Context) {
         NativeEngine.instance.clearAudioBuffers()
     }
 
-    private fun computePeaks(data: FloatArray, frames: Int, buckets: Int = 1600): FloatArray {
+    /**
+     * 波形峰值表。
+     *
+     * 桶数决定"最多能放大到多细"。1600 桶对一首 3 分钟的歌只有每桶 110ms，
+     * 放大到看单个鼓点时就是一段段重复的台阶（用户看到的"波形不跟缩放"里，
+     * 一半是绘制范围被截断，另一半就是这里分辨率不够）。
+     *
+     * 取 4096 桶：3 分钟素材每桶约 44ms，缩放到单小节级别仍有细节；
+     * 内存代价是每个素材 16KB 的 float 表，可以忽略。
+     */
+    private fun computePeaks(data: FloatArray, frames: Int, buckets: Int = 4096): FloatArray {
         if (frames <= 0 || data.size < 2) return FloatArray(0)
-        val n = buckets.coerceIn(64, 6000)
+        // 极短素材（< 0.5 秒）不需要那么多桶，按实际帧数封顶
+        val n = minOf(buckets, maxOf(64, frames)).coerceIn(64, 8192)
         val out = FloatArray(n)
         val per = (frames.toDouble() / n).coerceAtLeast(1.0)
         for (i in 0 until n) {
