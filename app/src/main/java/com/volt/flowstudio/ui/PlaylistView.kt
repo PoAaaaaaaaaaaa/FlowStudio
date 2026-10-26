@@ -429,18 +429,42 @@ class PlaylistView @JvmOverloads constructor(
         if (half <= 0.5f) return
 
         // 片段可能只截取了素材的一段：offset/length 是 tick，换算成峰值下标。
+        //
+        // 关键：波形只能覆盖"真的会出声的那一段"，不能拉伸铺满整个片段。
+        // 引擎里 renderAudioClip 是按素材原速播放的（不时间伸缩），
+        // 片段长度只决定它停在哪。所以当用户把片段拉长到超过素材长度时：
+        //   - 声音：素材播完就静音
+        //   - 旧绘法：把整段波形拉伸铺满 → 波形和声音对不上，看起来"波形被拉长了"
+        // 这就是"波形率和长度对不上"的成因。现在按实际有音频的那部分比例绘制。
         val bpm = project?.bpm?.coerceAtLeast(1f) ?: 120f
-        val totalTicks = asset.lengthTicks(bpm).coerceAtLeast(1)
-        val fromFrac = (clip.offset.toFloat() / totalTicks).coerceIn(0f, 1f)
-        val toFrac = ((clip.offset + clip.length).toFloat() / totalTicks).coerceIn(0f, 1f)
-        val span = (toFrac - fromFrac).coerceAtLeast(0.001f)
+        val assetTicks = asset.lengthTicks(bpm).coerceAtLeast(1)
 
-        // 波形必须横跨整个片段的可见宽度。
+        // 声音实际覆盖的 tick 区间：[offset, min(offset+length, assetTicks))
+        val playFrom = clip.offset.coerceIn(0, assetTicks)
+        val playTo = (clip.offset + clip.length).coerceAtMost(assetTicks)
+        if (playTo <= playFrom) {
+            // 片段整体在素材范围之外（被拖到素材末尾之后）—— 没有声音，只画中线
+            val mid = (top + bottom) / 2f
+            line(canvas, l + dp(2f), mid, r - dp(2f), mid,
+                Palette.withAlpha(Palette.AUDIO, 70), dp(1f))
+            return
+        }
+
+        // 这段音频在片段内占的像素比例（片段被拉得比素材长时 < 1）
+        val clipTicks = clip.length.coerceAtLeast(1)
+        val audioWidthFrac = ((playTo - playFrom).toFloat() / clipTicks).coerceIn(0f, 1f)
+
+        val fromFrac = (playFrom.toFloat() / assetTicks).coerceIn(0f, 1f)
+        val toFrac = (playTo.toFloat() / assetTicks).coerceIn(0f, 1f)
+        val span = (toFrac - fromFrac).coerceAtLeast(0.0001f)
+
+        // 波形必须横跨"有音频的那部分片段宽度"，不是整个可见宽度。
         //
         // 旧实现把列数钳在 900 并把 x 写成 l + c —— 于是片段宽于 900px 时
         // 波形只画到左边 900 像素就没内容了，缩放放大后看起来"波形没跟上"。
         // 真正的原因是绘制范围被截断，不是峰值数据不够。
-        val pxWidth = (r - l).coerceAtLeast(1f)
+        val fullWidth = (r - l).coerceAtLeast(1f)
+        val pxWidth = (fullWidth * audioWidthFrac).coerceAtLeast(1f)
         // 每根柱子 1.4px 宽（含 0.4px 缝），放大到很近时也不过密
         val step = 1.4f
         val cols = (pxWidth / step).toInt().coerceIn(1, 4000)
@@ -458,6 +482,16 @@ class PlaylistView @JvmOverloads constructor(
             val a = if (amp < 0.5f) 0.5f else amp
             val x = l + pxWidth * t
             canvas.drawRect(x, mid - a, x + step - 0.4f, mid + a, b.fill)
+        }
+
+        // 音频结束之后的那段（片段被拉长时）用一条暗虚线标出"这里没有声音"，
+        // 而不是留一块和有声区一样的空白 —— 用户能一眼看出是自己拉长了。
+        if (audioWidthFrac < 0.999f) {
+            val cut = l + pxWidth
+            line(canvas, cut, top + dp(1f), cut, bottom - dp(1f),
+                Palette.withAlpha(Palette.TEXT_FAINT, 90), dp(1f))
+            line(canvas, cut + dp(2f), mid, maxOf(cut + dp(2f), r - dp(2f)), mid,
+                Palette.withAlpha(Palette.TEXT_FAINT, 55), dp(1f))
         }
         // 中线压在波形上面：标准 DAW 的观感
         line(canvas, l + dp(2f), mid, maxOf(l + dp(2f), r - dp(2f)), mid,

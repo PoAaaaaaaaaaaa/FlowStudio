@@ -39,9 +39,37 @@ data class AudioAsset(
     val durationSec: Float
         get() = if (sampleRate > 0) frames.toFloat() / sampleRate else 0f
 
-    /** 在当前 BPM 下这段素材占多少 tick。 */
+    /**
+     * 在当前 BPM 下这段素材占多少 tick。
+     *
+     * 用 round 而不是 toInt：向下截断有系统性偏差。
+     * 14.8766 秒 @ 129.2 BPM = 14.8766 × 129.2/60 × 480 = 15376.6，
+     * `toInt()` 给 15376 —— 而 8 小节是 15360。差 16 tick 足够让这个片段
+     * 和下一段重叠。想要它正好落进小节槽位必须显式对齐，见 [snappedLengthTicks]。
+     */
     fun lengthTicks(bpm: Float): Int =
-        (durationSec.toDouble() * bpm / 60.0 * Note.PPQ).toInt().coerceAtLeast(Note.STEP)
+        Math.round(durationSec.toDouble() * bpm / 60.0 * Note.PPQ)
+            .toInt().coerceAtLeast(Note.STEP)
+
+    /**
+     * 对齐到整小节后的长度，用于"按小节摆放"的场景。
+     *
+     * 实录素材的长度几乎不会正好等于整小节。判据：与最近整小节的误差
+     * 在 [toleranceTicks] 之内就吸附过去。阈值默认 1/16 音符（120 tick）——
+     * 比这更大的差别说明这条素材本来就不是整小节长度，强行吸附会切掉
+     * 或补出明显内容，那不如保留原长。
+     */
+    fun snappedLengthTicks(bpm: Float, toleranceTicks: Int = Note.STEP): Int {
+        val raw = lengthTicks(bpm)
+        val bars = Math.round(raw.toDouble() / Note.BAR).toInt().coerceAtLeast(0)
+        if (bars <= 0) return raw
+        val snapped = bars * Note.BAR
+        return if (kotlin.math.abs(snapped - raw) <= toleranceTicks) snapped else raw
+    }
+
+    /** 这条素材是否本来就接近整小节长度（导入时自动吸附用）。 */
+    fun isNearBarLength(bpm: Float, toleranceTicks: Int = Note.STEP): Boolean =
+        snappedLengthTicks(bpm, toleranceTicks) != lengthTicks(bpm)
 
     /**
      * 这条素材和另一条是不是同一段音频。

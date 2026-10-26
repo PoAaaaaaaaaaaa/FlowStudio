@@ -878,7 +878,18 @@ class StudioSession(private val context: Context) {
      *
      * 每一层都要能真正创建成功，拿不到就往下走。
      */
-    private fun chooseExportFile(fileName: String): File {
+    /**
+     * 导出目录（第一个可写的）。
+     *
+     * 桥接的 /export/file 用它定位文件 —— 必须是"实际会写进去的那一个"，
+     * 所以和 chooseExportFile 共用同一套候选顺序。各写一份的话，
+     * 取文件时会找错目录，表现为"导出成功但取不到"。
+     */
+    fun exportDir(): File = exportDirCached ?: pickExportDir().also { exportDirCached = it }
+
+    private var exportDirCached: File? = null
+
+    private fun pickExportDir(): File {
         val candidates = listOfNotNull(
             // 公共音乐目录（Android 10+ 直接可写，无需权限）
             runCatching {
@@ -900,14 +911,14 @@ class StudioSession(private val context: Context) {
                 dir.mkdirs()
                 dir.isDirectory && dir.canWrite()
             }.getOrDefault(false)
-            if (ok) {
-                return File(dir, fileName)
-            }
+            if (ok) return dir
             android.util.Log.w("FlowStudio", "导出目录不可用: ${dir.absolutePath}")
         }
         // 全都不行也得给个路径，让上层报错而不是静默失败
-        return File(context.filesDir, "exports/$fileName")
+        return File(context.filesDir, "exports").apply { runCatching { mkdirs() } }
     }
+
+    private fun chooseExportFile(fileName: String): File = File(exportDir(), fileName)
 
     /** 导出目录的展示路径，界面上告诉用户去哪找 */
     fun exportDirHint(): String {

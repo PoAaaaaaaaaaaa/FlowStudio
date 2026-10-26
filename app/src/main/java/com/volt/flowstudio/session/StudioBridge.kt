@@ -584,6 +584,16 @@ class StudioBridge(
                     runOnMain { session.save(null) { ok -> Log.i(TAG, "保存: $ok") } }
                     200 to JSONObject().put("saving", true)
                 }
+                // ---- 导出：把手机引擎真正渲出来的成品给外部工具 ----
+                //
+                // 以前这里没有 export 路由，只有 MainActivity 里的界面按钮能导。
+                // 后果是外部工具没法用手机原生合成引擎出成品，只能拿 ffmpeg
+                // 另拼一份 —— 于是"同一首工程，两种渲染"，鼓音色和铺底相位
+                // 都对不上。补上这条路由，导出的就是引擎实时听到的那一份。
+                method == "POST" && path == "/export" -> handleExport(body)
+                // 视频/音频混流给插件的 mux_video 用：导出后按路径取文件
+                method == "GET" && path == "/export/file" ->
+                    handleExportFile(query["name"] ?: "")
                 method == "GET" && path == "/projects" -> 200 to projectsJson()
                 method == "POST" && path == "/projects/open" -> handleOpenProject(body)
                 // ---- 1.14 批量与结构编辑 ----
@@ -591,6 +601,24 @@ class StudioBridge(
                 method == "POST" && path == "/batch" -> handleBatch(body)
                 method == "GET" && path == "/clips" -> 200 to clipsJson()
                 method == "POST" && path == "/clips/arrange" -> handleArrangeClips(body)
+                // 把音频片段长度对齐到整小节。用于修复老工程：
+                // 1.36 及更早按 toInt() 算长度，普遍差几到十几 tick，
+                // validate 会报"互相吃内容"，靠手工 PATCH 逐条改极容易出错
+                // （改错一个数字就是整段错位）。这里一次做完。
+                method == "POST" && path == "/clips/align" -> {
+                    var n = 0
+                    runOnMain { n = session.project.alignAudioClipsToBars() }
+                    if (n > 0) {
+                        runOnMain { session.pushAll(); session.scheduleAutoSave() }
+                        bumpRevision()
+                        session.notifyExternalEdit("对齐音频片段到小节")
+                    }
+                    200 to JSONObject()
+                        .put("ok", true)
+                        .put("aligned", n)
+                        .put("barTicks", Note.BAR)
+                        .put("revision", revision)
+                }
                 method == "PATCH" && path.startsWith("/clips/") ->
                     handlePatchClip(path.removePrefix("/clips/").toIntOrNull(), body)
                 method == "POST" && path == "/automation" -> handleUpsertAutomation(body)
@@ -1007,6 +1035,69 @@ class StudioBridge(
     }
 
     /**
+     * 把音符参数解析成 Note，扁平四元组与对象两种形状都吃。
+     *
+     * 为什么必须两种都吃：`flowstudio_write` 与 `batch` 的 notes 参数一直是
+     * `[pitch, start, length, velocity]` 四元组，而 `pattern/edit` 只认
+     * `{pitch,start,length,velocity}` 对象。外部工具按习惯传四元组时，
+     * `optJSONObject(i)` 对数组返回 null → `?: continue` 全部跳过 →
+     * **一条都没写，却因为 list.clear() 已经把轨道清空了**，接口还回 ok:true。
+     * 用户看到的是"轨道突然变空"，而且没有任何报错。
+     *
+     * 这里的解析对未知形状返回 null，由调用方决定是否中止整次操作 ——
+     * 绝不允许"解析失败 = 静默写成空"。
+     */
+    private fun parseNote(raw: Any?): Note? {
+        return when (raw) {
+            is JSONObject -> Note(
+                pitch = raw.optInt("pitch", 60).coerceIn(0, 127),
+                start = raw.optInt("start", 0).coerceAtLeast(0),
+                length = raw.optInt("length", Note.STEP).coerceAtLeast(1),
+                velocity = raw.optInt("velocity", 100).coerceIn(1, 127)
+            )
+            is org.json.JSONArray -> {
+                // 允许 3 或 4 个元素：力度缺省 100
+                if (raw.length() < 3) null
+                else Note(
+                    pitch = raw.optInt(0, 60).coerceIn(0, 127),
+                    start = raw.optInt(1, 0).coerceAtLeast(0),
+                    length = raw.optInt(2, Note.STEP).coerceAtLeast(1),
+                    velocity = if (raw.length() >= 4) raw.optInt(3, 100).coerceIn(1, 127) else 100
+                )
+            }
+            else -> null
+        }
+    }
+
+    /** 解析一个 notes 数组，返回 (成功列表, 无法识别的元素数)。 */
+    private fun parseNotes(arr: JSONArray): Pair<List<Note>, Int> {
+        val out = ArrayList<Note>(arr.length())
+        var bad = 0
+        for (i in 0 until arr.length()) {
+            val n = parseNote(arr.opt(i))
+            if (n == null) bad++ else out.add(n)
+        }
+        return out to bad
+    }
+
+    /**
+     * 轨道操作里的下标字段。
+     *
+     * `tracks.patch` / `tracks.delete` 一直读 `index`，而 `flowstudio_write`
+     * 的 clips、automation 以及大部分工具参数用的是 `track`。
+     * 外部工具按"别的接口都是 track"的习惯传 `track` 时，`optInt("index", -1)`
+     * 得到 -1 → 报"轨道 -1 越界"，而报错信息里完全看不出是字段名的问题。
+     *
+     * 两个都认，`index` 优先（老调用保持不变），彻底消除这类无谓的试错。
+     */
+    private fun trackIndexOf(op: JSONObject): Int {
+        if (op.has("index")) return op.optInt("index", -1)
+        if (op.has("track")) return op.optInt("track", -1)
+        if (op.has("trackIndex")) return op.optInt("trackIndex", -1)
+        return -1
+    }
+
+    /**
      * 在某个样式的某条轨道上直接写音符（整体替换这一条轨道）。
      * 这是插件最常用的编辑入口：改鼓的一条轨，不需要把整首歌传一遍。
      */
@@ -1026,19 +1117,23 @@ class StudioBridge(
             pat.bars = o.optInt("bars", pat.bars).coerceIn(1, 64)
         }
 
+        // 先解析、后清空。
+        //
+        // 顺序反了就是"数据损失 + 谎报成功"：notes 一条都解析不出来时
+        // （比如扁平四元组喂给了只认对象的实现），list 已经被 clear() 了，
+        // 轨道变成空的，接口照样返回 ok:true 和 notes:0。
+        // 现在解析不出任何音符且输入非空 → 直接 400，一个字节都不动。
+        val (parsed, bad) = parseNotes(notesArr)
+        if (parsed.isEmpty() && notesArr.length() > 0) {
+            return 400 to JSONObject()
+                .put("error", "notes 一条都没解析出来（共 ${notesArr.length()} 条）。" +
+                        "支持 {pitch,start,length,velocity} 对象与 [pitch,start,length,velocity] 四元组")
+                .put("expected", "{pitch,start,length,velocity} 或 [pitch,start,length,velocity]")
+        }
+
         val list = pat.notes(trackIdx)
         list.clear()
-        for (i in 0 until notesArr.length()) {
-            val n = notesArr.optJSONObject(i) ?: continue
-            list.add(
-                Note(
-                    pitch = n.optInt("pitch", 60).coerceIn(0, 127),
-                    start = n.optInt("start", 0).coerceAtLeast(0),
-                    length = n.optInt("length", Note.STEP).coerceAtLeast(1),
-                    velocity = n.optInt("velocity", 100).coerceIn(1, 127)
-                )
-            )
-        }
+        list.addAll(parsed)
         list.sortBy { it.start }
 
         runOnMain { session.pushBpm(); session.scheduleAutoSave() }
@@ -1051,6 +1146,8 @@ class StudioBridge(
             .put("patternId", patId)
             .put("track", trackIdx)
             .put("notes", list.size)
+            // 部分解析失败时如实报出来，不要假装全对
+            .apply { if (bad > 0) put("unparsed", bad) }
     }
 
     /** 往已有样式里追加音符，不影响原有内容 */
@@ -1066,24 +1163,22 @@ class StudioBridge(
         if (trackIdx !in session.project.tracks.indices) {
             return 400 to JSONObject().put("error", "track $trackIdx 越界")
         }
-        val list = pat.notes(trackIdx)
-        var added = 0
-        for (i in 0 until arr.length()) {
-            val n = arr.optJSONObject(i) ?: continue
-            list.add(
-                Note(
-                    pitch = n.optInt("pitch", 60).coerceIn(0, 127),
-                    start = n.optInt("start", 0).coerceAtLeast(0),
-                    length = n.optInt("length", Note.STEP).coerceAtLeast(1),
-                    velocity = n.optInt("velocity", 100).coerceIn(1, 127)
-                )
-            )
-            added++
+        val (parsed, bad) = parseNotes(arr)
+        if (parsed.isEmpty() && arr.length() > 0) {
+            return 400 to JSONObject()
+                .put("error", "notes 一条都没解析出来（共 ${arr.length()} 条）")
+                .put("expected", "{pitch,start,length,velocity} 或 [pitch,start,length,velocity]")
         }
+        val list = pat.notes(trackIdx)
+        list.addAll(parsed)
         list.sortBy { it.start }
         runOnMain { session.pushBpm(); session.scheduleAutoSave() }
         bumpRevision()
-        return 200 to JSONObject().put("ok", true).put("added", added).put("revision", revision)
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("added", parsed.size)
+            .put("revision", revision)
+            .apply { if (bad > 0) put("unparsed", bad) }
     }
 
     /** 按条件删音符 */
@@ -1299,6 +1394,92 @@ class StudioBridge(
         bumpRevision()
         session.notifyExternalEdit("删除音频")
         return 200 to audioJson()
+    }
+
+    /**
+     * 用手机引擎离线渲染成品，返回文件路径。
+     *
+     * 这是 1.37 补上的接口。在此之前桥接的路由表里根本没有 export ——
+     * 外部工具没法让手机出成品，只能拿 ffmpeg 另拼一份，
+     * 于是"同一首工程，两种渲染"：手机上听到的鼓是引擎合成的，
+     * mp3 里的是另一套代码合成的，音色与相位必然对不上。
+     *
+     * body: { startTick?, endTick?, sampleRate?, name? }
+     * 返回: { ok, path, name, bytes, seconds, sampleRate }
+     */
+    private fun handleExport(body: String): Pair<Int, JSONObject> {
+        val o = if (body.isBlank()) JSONObject() else runCatching { JSONObject(body) }
+            .getOrElse { return 400 to JSONObject().put("error", "body 不是合法 JSON") }
+
+        val p = session.project
+        val total = p.lengthTicks()
+        val start = o.optInt("startTick", 0).coerceIn(0, maxOf(0, total))
+        val end = o.optInt("endTick", total).let { if (it > start) it else total }
+        val rate = o.optInt("sampleRate", 44100).coerceIn(8000, 192000)
+        val name = o.optString("name", "").trim()
+
+        // exportWav 是异步的（离线渲染几分钟的歌要几秒），这里用闩锁等它。
+        // 超时按渲染长度放宽：60 秒的曲子离线渲一遍通常 1~3 秒。
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var file: java.io.File? = null
+        session.exportWav(start, end, rate) { f ->
+            file = f
+            latch.countDown()
+        }
+        val done = latch.await(180, java.util.concurrent.TimeUnit.SECONDS)
+        if (!done) return 504 to JSONObject().put("error", "导出超时（工程可能过长）")
+        val f = file ?: return 500 to JSONObject().put("error", "导出失败：渲染或写盘出错")
+
+        // 允许调用方指定文件名 —— 插件导完要立刻 mux 成视频，需要可预测的名字
+        val finalFile = if (name.isNotBlank()) {
+            val safe = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(80)
+                .let { if (it.endsWith(".wav", true)) it else "$it.wav" }
+            runCatching {
+                val dst = java.io.File(f.parentFile, safe)
+                if (dst != f) { f.copyTo(dst, overwrite = true); f.delete() }
+                dst
+            }.getOrDefault(f)
+        } else f
+
+        val frames = (finalFile.length() - 44).coerceAtLeast(0) / 4   // 16-bit 立体声
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("path", finalFile.absolutePath)
+            .put("name", finalFile.name)
+            .put("bytes", finalFile.length())
+            .put("seconds", frames.toDouble() / rate)
+            .put("sampleRate", rate)
+            .put("startTick", start)
+            .put("endTick", end)
+            .put("dirHint", session.exportDirHint())
+    }
+
+    /**
+     * 按文件名取回已导出的文件（base64），供插件导成视频用。
+     *
+     * 只允许读导出目录内的文件：路径拼接前先做名字净化，
+     * 防止 `../` 之类的穿越读到私有数据。
+     */
+    private fun handleExportFile(name: String): Pair<Int, JSONObject> {
+        if (name.isBlank()) return 400 to JSONObject().put("error", "需要 name")
+        val clean = java.io.File(name).name    // 去掉任何目录成分
+        if (clean != name || clean.contains("..")) {
+            return 400 to JSONObject().put("error", "name 只能是文件名")
+        }
+        val f = runCatching { java.io.File(session.exportDir(), clean) }.getOrNull()
+            ?: return 400 to JSONObject().put("error", "路径不合法")
+        if (!f.isFile) return 404 to JSONObject().put("error", "没有这个文件：$clean")
+        if (f.length() > 256L * 1024 * 1024) {
+            return 413 to JSONObject().put("error", "文件过大（上限 256 MB）")
+        }
+        val b64 = runCatching {
+            android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+        }.getOrElse { return 500 to JSONObject().put("error", "读取失败") }
+        return 200 to JSONObject()
+            .put("ok", true)
+            .put("name", f.name)
+            .put("bytes", f.length())
+            .put("wavBase64", b64)
     }
 
     private fun handleAddClip(body: String): Pair<Int, JSONObject> {
@@ -1531,7 +1712,7 @@ class StudioBridge(
                     else -> null
                 }
             }
-            "tracks.patch" -> needTrack(op.optInt("index", -1))
+            "tracks.patch" -> needTrack(trackIndexOf(op))
             "tracks.add" -> {
                 val inst = op.optString("inst", "SYNTH").uppercase()
                 when {
@@ -1541,7 +1722,7 @@ class StudioBridge(
                 }
             }
             "tracks.delete" -> {
-                val i = op.optInt("index", -1)
+                val i = trackIndexOf(op)
                 when {
                     i !in p.tracks.indices -> "轨道 $i 越界（共 ${p.tracks.size} 条）"
                     p.tracks.size <= 1 -> "至少要留一条轨道"
@@ -1665,7 +1846,7 @@ class StudioBridge(
                 return JSONObject().put("ok", true).put("index", idx)
             }
             "tracks.patch" -> {
-                val index = op.optInt("index")
+                val index = trackIndexOf(op)
                 val t = p.trackAt(index)!!
                 if (op.has("name")) t.name = op.optString("name", t.name)
                 if (op.has("volume")) t.volume = op.optDouble("volume", t.volume.toDouble()).toFloat().coerceIn(0f, 1.5f)
@@ -1679,7 +1860,7 @@ class StudioBridge(
                 return JSONObject().put("ok", true).put("index", index)
             }
             "tracks.delete" -> {
-                val i = op.optInt("index", -1)
+                val i = trackIndexOf(op)
                 val removedClips = p.clips.count { it.track == i }
                 val why = p.removeTrackAt(i)
                 if (why != null) return JSONObject().put("ok", false).put("error", why)

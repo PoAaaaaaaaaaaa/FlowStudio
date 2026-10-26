@@ -212,6 +212,8 @@ private:
     void releaseNotesAt(int32_t tick);
     double ticksPerSample() const;
     void resetVoices();
+    /** 清掉会自己响一会儿的状态：发送总线、插入效果延迟线、母带平滑器。 */
+    void resetTails();
     void applyAutomation(int track, double tick, Channel& ch);
     void renderAudioClip(const AudioClip& clip, float* busL, float* busR,
                          int frames, double pos, double tps, float bpmNow);

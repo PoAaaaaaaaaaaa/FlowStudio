@@ -61,29 +61,44 @@ class Project {
     /**
      * 把素材摆到时间线上，返回新片段。长度默认铺满整段素材。
      *
-     * 避让规则（这是"导入音频"的落点策略）：
-     *   1. 先从请求的轨道往后找第一条空轨道 —— 新素材独占一条轨，
-     *      是 DJ 式排布的默认习惯，也绝不可能撞别人的内容；
-     *   2. 没有空轨道就追加一条新轨道；
+     * 落点策略：
+     *   1. 先从请求的轨道往后找一条**没有音频片段**的轨道 ——
+     *      新素材独占一条轨，是 DJ 式排布的默认习惯；
+     *   2. 没有这样的轨道，才追加一条新轨（且只在 allowNewTrack 时）；
      *   3. startTick 落在该轨已有片段上时，顺延到第一个空位。
      *
-     * 之前的实现直接丢在 selectedTrack 的播放头位置：那里已经有片段时
-     * 两个片段叠在同一轨同一时间，互相吃内容 —— 用户报告的就是这个。
+     * 长度：默认走 [AudioAsset.snappedLengthTicks]，也就是"接近整小节就对齐"。
+     * 这是"片段长度和小节对不上、和下一段重叠 16 tick"的修法。
+     *
+     * 为什么不再无条件加轨：以前每次导入都
+     * `tracks.indices.firstOrNull { clips.none { it.track == t } }` ——
+     * 只要有一条空轨（哪怕它只是"暂时还没放东西"），也会被当成目标；
+     * 找完之后又因为 clips 里没有它的片段而**再建一条**，于是空轨越删越多、
+     * `validate` 永远报"空轨道：N"。现在只认"这条轨上还没有音频"，
+     * 而不是"这条轨上什么都没有"，空轨不会因为导入而被消耗又增生。
      */
     fun placeAudio(
         asset: AudioAsset, track: Int, startTick: Int, lengthTicks: Int = 0,
-        allowNewTrack: Boolean = true
+        allowNewTrack: Boolean = true,
+        snapToBar: Boolean = true
     ): Clip {
-        val len = if (lengthTicks > 0) lengthTicks else asset.lengthTicks(bpm)
+        val rawLen = if (lengthTicks > 0) lengthTicks
+                     else if (snapToBar) asset.snappedLengthTicks(bpm)
+                     else asset.lengthTicks(bpm)
+        // 无论如何都对齐到 step：非整 step 的长度在网格上无法表达
+        val len = maxOf(Note.STEP, rawLen)
 
-        // 1. 找空轨道：请求轨为空就用它，否则往后面找
-        var target = track.coerceIn(0, maxOf(0, tracks.size - 1))
-        val emptyTrack = tracks.indices.firstOrNull { t -> clips.none { it.track == t } }
-        target = if (clips.none { it.track == target }) target
-        else emptyTrack ?: if (allowNewTrack) {
-            addTrack(Instrument.SYNTH, "音频 ${tracks.size + 1}")
-            tracks.size - 1
-        } else target
+        // 1. 选轨：优先"没有音频片段的轨道"，其次请求轨
+        val hasAudioOn = { t: Int -> clips.any { it.isAudio && it.track == t } }
+        val requested = track.coerceIn(0, maxOf(0, tracks.size - 1))
+        val target: Int = when {
+            !hasAudioOn(requested) -> requested
+            else -> tracks.indices.firstOrNull { !hasAudioOn(it) }
+                ?: if (allowNewTrack) {
+                    addTrack(Instrument.SYNTH, "音频 ${tracks.size + 1}")
+                    tracks.size - 1
+                } else requested
+        }
 
         // 2. 找该轨第一个空位：从 startTick 起，撞上片段就跳到它末尾
         var start = startTick.coerceAtLeast(0)
@@ -99,13 +114,38 @@ class Project {
             patternId = -1,
             track = target,
             start = start,
-            length = len.coerceAtLeast(Note.STEP),
+            length = len,
             offset = 0,
             label = "",
             audioId = asset.id
         )
         clips.add(c)
         return c
+    }
+
+    /**
+     * 把某条轨上所有音频片段的长度对齐到最近整小节。
+     *
+     * 用于修复已经存在的老工程：1.36 及更早导入的音频片段长度是
+     * 按 `toInt()` 算的，普遍差几到十几 tick，`validate` 会报互相重叠。
+     * 由桥接的 `/clips/align` 与 `validate` 的修复建议调用。
+     *
+     * 返回被调整的片段数。
+     */
+    fun alignAudioClipsToBars(toleranceTicks: Int = Note.STEP): Int {
+        var changed = 0
+        for (c in clips) {
+            if (!c.isAudio) continue
+            val asset = audioAssetById(c.audioId) ?: continue
+            // 已经手工改成整小节的不要动
+            if (c.length % Note.BAR == 0) continue
+            val want = asset.snappedLengthTicks(bpm, toleranceTicks)
+            if (want != c.length) {
+                c.length = want
+                changed++
+            }
+        }
+        return changed
     }
 
     fun lengthTicks(): Int = maxOf(barTicks * 16, clips.maxOfOrNull { it.end } ?: 0)

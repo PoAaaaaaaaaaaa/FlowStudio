@@ -130,7 +130,26 @@ void Engine::play() {
     playing_.store(true);
 }
 
-void Engine::pause() { playing_.store(false); }
+/**
+ * 暂停。
+ *
+ * 只把 playing_ 置 false 是不够的 —— 那是"不再推进时间"，不是"停声"。
+ * 已经触发的发声单元会继续沿着自己的包络往下走完：
+ * 长音（铺底、弦乐、Pad）在暂停那一刻如果还按着，就会一直挂在释放段，
+ * 因为它的 endTick 只在"时间推进"时才被 releaseNotesAt 处理，
+ * 而暂停后时间不推进了 —— 于是它们永远等不到释放。
+ * 表现就是"按了暂停/停止，某个声音一直响"。
+ *
+ * stop() 里有 resetVoices()，但 pause() 没有；而界面的"停止"按钮
+ * 走的是 stop() → 位置归零，用户再按播放会从头开始，听感上像"停了"。
+ * 真正会挂住的是暂停路径和循环回绕之外的那些边界情况。
+ * 这里统一把发声单元软释放掉，两个按钮都不会留尾巴。
+ */
+void Engine::pause() {
+    playing_.store(false);
+    // 软释放：走 release 段自然衰减，不是硬切 —— 硬切会有一声爆音。
+    allNotesOff();
+}
 
 void Engine::stop() {
     playing_.store(false);
@@ -138,6 +157,34 @@ void Engine::stop() {
     noteCursor_.store(0, std::memory_order_release);
     lastBeat_ = -1;
     resetVoices();
+    resetTails();
+}
+
+/**
+ * 清掉所有"会自己响一会儿"的状态：发送总线、每轨插入效果、母带平滑器。
+ *
+ * 这是"按了停止，声音还在"的第二条根因，而且是更隐蔽的那条：
+ * resetVoices() 只停发声单元，但混响和延迟的缓冲区里还存着几秒的尾音，
+ * 它们由 reverbBus_ / delayBus_ 独立处理，与 playing_ 无关 ——
+ * 停止只是不再送新声音进去，已有的尾音照常吐出来。
+ * 一记底鼓推进 3 秒混响，按停止后还能听到它慢慢散掉，用户当然觉得"没停"。
+ *
+ * 只在 stop() 里清，不在 pause() 里清 —— 暂停再继续时要保留尾音的自然延续。
+ */
+void Engine::resetTails() {
+    reverbBus_.reset();
+    delayBus_.reset();
+    // 每条轨的插入效果也各自带延迟线（Delay/Chorus/Phaser 都有内部缓冲）
+    for (auto& ch : channels_) {
+        for (auto& fx : ch.fx) fx.reset();
+    }
+    // 母带平滑器：不清的话音量会从上一首的稳态慢慢爬回来
+    masterSm_.reset(0.f);
+    // 总线缓冲本身也清一遍，避免上一帧的残值被当成新声音
+    std::fill(revL_.begin(), revL_.end(), 0.f);
+    std::fill(revR_.begin(), revR_.end(), 0.f);
+    std::fill(dlyL_.begin(), dlyL_.end(), 0.f);
+    std::fill(dlyR_.begin(), dlyR_.end(), 0.f);
 }
 
 void Engine::setPositionTicks(double t) {
