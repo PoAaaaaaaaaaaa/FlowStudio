@@ -96,12 +96,62 @@ class MainActivity : Activity() {
         applyKeepAwake()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        buildUi()
-        bindSession()
-        showTab(0)
-        showBootDiagnostics()
-        ui.post(ticker)
-        ensureMediaPermission()
+        // 界面构建必须与"崩溃"隔离。
+        //
+        // 真实事故（1.31）：applyBackground 在内容 View 创建之前访问了
+        // lateinit 的 content，抛 UninitializedPropertyAccessException，
+        // 用户在 onCreate 阶段就直接闪退 —— 连错误提示都看不到，
+        // 也无从判断是哪一个功能出的问题。
+        //
+        // 现在任何一步失败都降级成"能打开 + 顶部一条红条说明原因"，
+        // 而不是让整个应用起不来。DAO 里一个空指针不该让用户丢掉他的工程。
+        val stage = runCatching {
+            buildUi()
+            bindSession()
+            showTab(0)
+            showBootDiagnostics()
+            ui.post(ticker)
+            ensureMediaPermission()
+        }
+        stage.exceptionOrNull()?.let { t ->
+            android.util.Log.e("FlowStudio", "界面初始化失败", t)
+            showFatalBanner(t)
+        }
+    }
+
+    /**
+     * 界面初始化失败时的兜底：仍然给用户一个可操作的界面，
+     * 顶部红条说明崩在哪一步，点开可以复制完整堆栈。
+     */
+    private fun showFatalBanner(t: Throwable) {
+        val root = FrameLayout(this)
+        val tv = TextView(this).apply {
+            text = "⚠ 界面初始化失败：${t.javaClass.simpleName}${t.message?.let { m -> "：$m" } ?: ""}\n" +
+                "点这里看详情 · 工程数据未受影响"
+            setTextColor(0xFFFFE4E0.toInt())
+            setBackgroundColor(0xFF7A1D18.toInt())
+            textSize = 12f
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnClickListener {
+                val sw = java.io.StringWriter()
+                t.printStackTrace(java.io.PrintWriter(sw))
+                android.app.AlertDialog.Builder(this@MainActivity,
+                    android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("界面初始化失败")
+                    .setMessage(sw.toString())
+                    .setPositiveButton("复制") { _, _ ->
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("FlowStudio", sw.toString()))
+                        toast("已复制")
+                    }
+                    .setNegativeButton("关闭", null)
+                    .show()
+            }
+        }
+        root.addView(tv, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = android.view.Gravity.TOP })
+        setContentView(root)
     }
 
     /**
@@ -249,7 +299,8 @@ class MainActivity : Activity() {
         val bg = StudioBackground(this)
         backgroundView = bg
         root.addView(bg, matchParams())
-        applyBackground()
+        // 背景图的实际应用放到 buildUi 末尾：那时内容 View 都已创建，
+        // 不会碰到 lateinit。首屏这里只把底层铺上去。
 
         val column = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -414,6 +465,10 @@ class MainActivity : Activity() {
         content.addView(mixerHolder, matchParams())
 
         setContentView(root)
+
+        // 所有内容 View 到这里才齐。背景图放在这里应用 ——
+        // 早于这里调用会撞 lateinit（1.31 的启动闪退就是这么发生的）。
+        applyBackground()
 
         // 系统栏：只把整列往内推，不参与高度分配，避免和布局互相打架。
         root.setOnApplyWindowInsetsListener { _, insets ->
@@ -884,15 +939,16 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPlayhead() {
-        if (!session.engine.available) return
-        val pos = session.positionTicks()
+        // 底部数值表与摆件都**不依赖音频引擎**：
+        // 它们是工程数据的呈现，引擎挂了也应该照常显示
+        //（"引擎不可用但界面仍可使用"是这个 App 的既有设计）。
+        // 以前这里开头就 `if (!engine.available) return`，
+        // 结果引擎一坏，读数条与摆件全部冻在初始值上。
+        val pos0 = runCatching { session.positionTicks() }.getOrDefault(0)
 
-        // 顶部摆件：电平与播放状态。只在这里喂数据，绘制开销都在 OrnamentBar 内部，
-        // 且它自己判断"要不要继续动画"——静止时不重绘。
-        // 底部数值表
         readout?.let { ro ->
             val p = session.project
-            ro.positionTicks = pos
+            ro.positionTicks = pos0
             ro.barTicks = p.barTicks
             ro.bpm = p.bpm
             ro.totalBars = p.lengthBars()
@@ -910,7 +966,7 @@ class MainActivity : Activity() {
                 chordCacheKey = key
                 chordByBar = computeChords(p)
             }
-            val curBar = pos / p.barTicks.coerceAtLeast(1)
+            val curBar = pos0 / p.barTicks.coerceAtLeast(1)
             ro.chordLabel = chordByBar[curBar] ?: ""
         }
 
@@ -922,7 +978,7 @@ class MainActivity : Activity() {
             // 当前拍：四拍点阵与脉冲用它
             val barTicks = session.project.barTicks.coerceAtLeast(1)
             val beatTicks = barTicks / 4
-            o.beatIndex = if (beatTicks > 0) (pos % barTicks) / beatTicks else 0
+            o.beatIndex = if (beatTicks > 0) (pos0 % barTicks) / beatTicks else 0
             // 进到新的一拍时给一个脉冲（由 OrnamentBar 自己衰减）
             if (session.isPlaying() && o.beatIndex != lastOrnamentBeat) {
                 lastOrnamentBeat = o.beatIndex
@@ -931,10 +987,16 @@ class MainActivity : Activity() {
                 o.beatPulse = (o.beatPulse - 0.08f).coerceAtLeast(0f)
             }
         }
-        transportBar.positionTicks = pos
+        // 走带条：位置不依赖引擎（引擎坏了也该看到"停在哪"）
+        transportBar.positionTicks = pos0
         transportBar.barTicks = session.project.barTicks
         transportBar.bpm = session.project.bpm
         transportBar.setPlaying(session.isPlaying())
+
+        // 引擎不可用时到此为止：下面的都是音频相关的刷新
+        if (!session.engine.available) return
+        val pos = session.positionTicks()
+
         when (currentTab) {
             0 -> {
                 playlist.playheadTick = pos
@@ -1315,20 +1377,56 @@ class MainActivity : Activity() {
         return com.volt.flowstudio.ui.ChordDetect.detectByBar(notes, bt, totalBars)
     }
 
+    /**
+     * 把设置里的背景图贴到底层。
+     *
+     * 注意调用时机：buildUi() 早期（内容 View 还没创建）也会调它，
+     * 所以这里绝不能触碰 rack / playlist / piano / keys / mixer ——
+     * 那些是 lateinit，提前访问会直接抛 UninitializedPropertyAccessException，
+     * 表现就是"一进软件就闪退"。重绘只用可空判断的 View，或者干脆交给
+     * 下一次 onDraw 自然发生。
+     */
     private fun applyBackground() {
         val bg = backgroundView ?: return
         bg.dim = settings.dimBackground
-        val bmp = settings.loadBackground()
-        bg.backgroundImage = bmp
-        // 关键一步：内容 View 的底色要不要让位。
-        // 不设这个开关，机架/卷帘/混音/编排的开屏 drawColor(Palette.BG)
-        // 会把背景图整块盖掉 —— 那正是"设置成功但没效果"的原因。
-        com.volt.flowstudio.ui.CanvasBackdrop.showThrough = bmp != null
+
+        // 解码是 IO + 大图缩放，主线程做会卡首屏几百毫秒。
+        // 首屏（buildUi 期间）只设开关，图异步加载后自己 invalidate。
+        val shouldShow = settings.hasBackground()
+        com.volt.flowstudio.ui.CanvasBackdrop.showThrough = shouldShow
         bg.invalidate()
-        // 所有页面都要重绘一次才能看到新底色
-        content?.invalidate()
+
+        if (shouldShow && bg.backgroundImage == null) {
+            val path = settings.backgroundPath
+            Thread {
+                val bmp = runCatching {
+                    path?.let { android.graphics.BitmapFactory.decodeFile(it) }
+                }.getOrNull()
+                if (bmp != null) {
+                    ui.post {
+                        bg.backgroundImage = bmp
+                        bg.invalidate()
+                    }
+                }
+            }.start()
+        } else if (!shouldShow) {
+            bg.backgroundImage = null
+        }
+
+        // 内容 View 可能还没创建（首屏），也可能已经在跑（用户改设置）。
+        //
+        // 关键：content / rootLayout 是 lateinit，写成 `content?.invalidate()`
+        // 并不能拦住 —— 读取 lateinit 字段这个动作本身就会抛
+        // UninitializedPropertyAccessException（本次闪退就是这么来的）。
+        // 必须用 ::x.isInitialized 先问一句。
+        // content 是 lateinit，必须用 ::x.isInitialized；rootLayout 是可空，用 ?.
+        if (::content.isInitialized) content.invalidate()
         rootLayout?.invalidate()
-        refreshAll(session.project)
+        if (::rack.isInitialized) rack.invalidate()
+        if (::playlist.isInitialized) playlist.invalidate()
+        if (::piano.isInitialized) piano.invalidate()
+        if (::mixer.isInitialized) mixer.invalidate()
+        if (::keys.isInitialized) keys.invalidate()
     }
 
     private fun applyKeepAwake() {

@@ -9,11 +9,11 @@ on:
       version_name:
         description: '版本名（例如 1.0.0）'
         required: false
-        default: '1.31'
+        default: '1.31.1'
 
 env:
-  VERSION_NAME: ${{ github.event.inputs.version_name || '1.31' }}
-  VERSION_CODE: '33'
+  VERSION_NAME: ${{ github.event.inputs.version_name || '1.31.1' }}
+  VERSION_CODE: '34'
   # ubuntu-latest 预装了 Android SDK，直接用；不走会坏的 setup-android action
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk

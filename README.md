@@ -14,6 +14,60 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.31.1 更新（启动闪退修复）
+
+**问题**：装上 1.31 后一进软件就闪退。
+
+**崩溃栈**（真机 logcat 实读）：
+
+```
+kotlin.UninitializedPropertyAccessException:
+    lateinit property content has not been initialized
+  at MainActivity.applyBackground(MainActivity.kt:1329)
+  at MainActivity.buildUi(MainActivity.kt:252)
+  at MainActivity.onCreate(MainActivity.kt:99)
+```
+
+**根因**：1.31 为了实现"背景图生效"，在 `buildUi()` 早期（第 252 行，
+内容 View 还没创建）调用了 `applyBackground()`，而它内部要
+`content?.invalidate()` 并 `refreshAll()` —— 两者都会读 `content` / `rack` /
+`playlist` / `piano` / `mixer` / `keys` 这些 `lateinit` 字段。
+
+这里有个 Kotlin 的陷阱值得记下来：
+
+```kotlin
+private lateinit var content: FrameLayout
+...
+content?.invalidate()   // 并不会"安全跳过"！
+```
+
+`?.` 只能拦住**值为 null** 的情况。`lateinit` 字段在赋值前读取时抛的是
+`UninitializedPropertyAccessException`，那个异常发生在**读取字段的瞬间**，
+`?.` 根本没机会介入。正确写法是：
+
+```kotlin
+if (::content.isInitialized) content.invalidate()
+```
+
+**修法**（三层）：
+
+1. `applyBackground()` 不再调用 `refreshAll()`，改成对每个 `lateinit` 视图用
+   `::x.isInitialized` 逐个判断后再 invalidate
+2. `applyBackground()` 的调用点从 `buildUi()` 开头移到 `setContentView(root)` 之后 ——
+   那时所有视图都已创建，从根本上不会碰到未初始化的字段
+3. `onCreate` 整段加 `runCatching` 隔离：任何一步失败都降级成
+   "能打开 + 顶部红条说明崩在哪"，而不是让整个应用起不来。
+   点红条可看完整堆栈并可复制
+
+**顺带修的两处**：
+
+- `rootLayout?.requestApplyInsets()` —— `rootLayout` 是 `FrameLayout?`（可空而非
+  lateinit），`?.` 在这里是对的，保留
+- **底部数值表永远不更新**：`refreshPlayhead()` 开头有
+  `if (!session.engine.available) return`，把读数条与摆件都挡在后面。
+  但这两者只依赖工程数据、不依赖音频引擎（"引擎不可用但界面仍可使用"
+  本来就是既有设计）。已把它们的刷新移到引擎判断之前。
+
 ## 1.31 更新
 
 ### 钢琴引擎：AI 能真的"弹"出来
