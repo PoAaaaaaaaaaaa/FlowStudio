@@ -73,7 +73,7 @@ class PianoRollView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.BG)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         val pat = pattern ?: return
         keyWidth = dp(34f)

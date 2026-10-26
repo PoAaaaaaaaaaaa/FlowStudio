@@ -86,7 +86,7 @@ class ChannelRackView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.BG)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         val p = project ?: return
         headerH = dp(32f)

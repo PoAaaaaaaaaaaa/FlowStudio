@@ -51,6 +51,11 @@ class PlaylistView @JvmOverloads constructor(
             invalidate()
         }
 
+    /** 缩放动画目标与锚点（动画由 stepZoom 每帧推进）。 */
+    private var zoomTarget = 1f
+    private var zoomAnchorTick = 0
+    private var zoomAnimating = false
+
     /** 每小节像素宽；给了确定值就优先用它（工具栏放大缩小走这条）。 */
     var pixelsPerBar: Float = 0f
 
@@ -121,8 +126,8 @@ class PlaylistView @JvmOverloads constructor(
     )
     companion object {
         /** 缩放边界。再小就看不清片段边界，再大就一分钟要翻十屏。 */
-        const val MIN_ZOOM = 0.25f
-        const val MAX_ZOOM = 12f
+        const val MIN_ZOOM = 0.15f
+        const val MAX_ZOOM = 40f
 
         /**
          * 拖动判定阈值（dp）。
@@ -136,6 +141,9 @@ class PlaylistView @JvmOverloads constructor(
         /** 拖右缘改长度时，命中把手的热区宽度。放宽到 22dp 更好点中。 */
         const val HANDLE_DP = 22f
     }
+
+    /** 单击片段后先记下，双击判定结束时才决定要不要打开。 */
+    private var pendingOpenClip: com.volt.flowstudio.model.Clip? = null
 
     private val scanCache = HashMap<EnvelopeKey, FloatArray>()
     private var scanCacheBarWidth = -1f
@@ -164,7 +172,11 @@ class PlaylistView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.BG)
+
+        // 缩放动画：每帧推进一次再画，否则画面会"啪"地跳到新密度。
+        val stillZooming = if (zoomAnimating) stepZoom() else false
+
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         val p = project ?: return
         headerWidth = dp(if (w < dp(520f)) 54f else 68f)
@@ -182,6 +194,9 @@ class PlaylistView @JvmOverloads constructor(
         drawRuler(canvas, w, bw)
         drawClips(canvas, p, w, h)
         drawPlayhead(canvas, w, h)
+
+        // 缩放动画还没停：立刻要求下一帧，否则走到新密度会一顿一顿
+        if (stillZooming) postInvalidateOnAnimation()
     }
 
     /** 轨道底纹与轨道头。 */
@@ -528,9 +543,30 @@ class PlaylistView @JvmOverloads constructor(
                 lastTapY = e.y
 
                 if (isDoubleTap && e.y > rulerHeight) {
-                    // 以双击位置为中心缩放，这样想放大的那一小段不会跑出屏幕。
-                    zoomAround(e.x, if (zoom < 3f) zoom * 2f else 1f)
+                    // 双击空白 = 缩放视图；双击片段 = 打开它。
+                    //
+                    // 之前单指点一下片段就立刻弹编辑面板，手指稍微偏一点、
+                    // 或者只想选中看看，都会把面板怼到脸上 —— 用户报的"误触"就是这个。
+                    // 现在单击只选中并定位，真正的"打开"必须双击。
+                    val rowD = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
+                    val tickD = xToTick(e.x)
+                    val hitClip = if (rowD in p.tracks.indices) {
+                        p.clips.lastOrNull {
+                            it.track == rowD && tickD >= it.start && tickD < it.end
+                        }
+                    } else null
+
+                    if (hitClip != null) {
+                        activeClip = hitClip
+                        onSelectTrack?.invoke(rowD)
+                        if (hitClip.isAudio) onAudioTap?.invoke(hitClip)
+                        else onClipTapped?.invoke(hitClip)
+                    } else {
+                        // 双击空白：以该位置为中心缩放
+                        zoomAround(e.x, if (zoom < 3f) zoom * 2f else 1f)
+                    }
                     drag = Drag.NONE
+                    pendingOpenClip = null
                     return true
                 }
 
@@ -583,7 +619,9 @@ class PlaylistView @JvmOverloads constructor(
                         else -> Drag.MOVE
                     }
                     onSelectTrack?.invoke(row)
-                    if (clip.isAudio) onAudioTap?.invoke(clip) else onClipTapped?.invoke(clip)
+                    // 只记住"可能是要打开的目标"，等双击判定或抬手后再决定。
+                    // 拖动改长度/移动不该弹面板，所以这里不立即回调。
+                    pendingOpenClip = clip
                     invalidate()
                 } else {
                     drag = Drag.SEEK
@@ -618,7 +656,14 @@ class PlaylistView @JvmOverloads constructor(
                     val span = pointerSpan(e)
                     if (pinchStartDist > 1f && span > 1f) {
                         val ratio = span / pinchStartDist
-                        applyZoomAnchored(pinchStartZoom * ratio, pinchAnchorTick)
+                        // 捏合是连续手势：直接设目标并让动画平滑追上，
+                        // 不逐帧硬设 zoom（那样手指一动画面就跳，毫无"跟随"感）。
+                        zoomTarget = (pinchStartZoom * ratio).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                        zoomAnchorTick = pinchAnchorTick
+                        if (!zoomAnimating) {
+                            zoomAnimating = true
+                            postInvalidateOnAnimation()
+                        }
                     }
                     return true
                 }
@@ -705,10 +750,15 @@ class PlaylistView @JvmOverloads constructor(
                     onClipsChanged?.invoke()
                 }
                 if (drag == Drag.SEEK && !moved) {
-                    // 只有"真的点了一下"（没越过阈值）才弹空态导入。
-                    // 以前的写法只要起点落在空白就触发，于是平移屏幕也会弹导入框。
+                    // 空处单击：只移动播放头，不再弹导入框。
+                    //
+                    // 导入音频是低频动作，且此前每次轻点空白轨道都会弹出来，
+                    // 在编排页来回看的时候极其烦人。现在导入走工具栏的「+ 音频」，
+                    // 空白处单击只定位 —— 这是 FL / Ableton 的一致行为。
                     val row = ((e.y - rulerHeight + scrollY) / rowHeight).toInt()
-                    if (row in p.tracks.indices) onEmptyTap?.invoke(row, xToTick(e.x).coerceAtLeast(0))
+                    if (row in p.tracks.indices) {
+                        onSeek?.invoke(xToTick(e.x).coerceAtLeast(0))
+                    }
                 }
                 drag = Drag.NONE
                 activeClip = null
@@ -742,15 +792,57 @@ class PlaylistView @JvmOverloads constructor(
      * 这是"能缩放但不好用"的典型症状。
      */
     private fun applyZoomAnchored(target: Float, anchorTick: Int) {
+        val clamped = target.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        // 手感：缩放要走动画，不能瞬间跳。
+        // 之前 zoom 是直接赋值，双击/捏合放手时画面"啪"地换个密度，
+        // 用户报的"瞬间切过去"就是这个。
+        zoomTarget = clamped
+        zoomAnchorTick = anchorTick
+        if (!zoomAnimating) {
+            zoomAnimating = true
+            postInvalidateOnAnimation()
+        }
+        scanCache.clear()
+    }
+
+    /**
+     * 每帧推进缩放动画。
+     *
+     * 用指数逼近而不是线性插值：缩放手感要"快起步、慢收尾"，
+     * 线性会让最后几像素拖很久。系数 0.28 在 60fps 下约 5 帧到 95%，
+     * 再配合"足够接近就吸附"避免无限逼近。
+     */
+    private fun stepZoom(): Boolean {
+        val diff = zoomTarget - zoom
+        if (abs(diff) < 0.0015f) {
+            if (zoom != zoomTarget) {
+                applyZoomNow(zoomTarget, zoomAnchorTick)
+            }
+            zoomAnimating = false
+            return false
+        }
+        val next = zoom + diff * 0.28f
+        applyZoomNow(next, zoomAnchorTick)
+        return true
+    }
+
+    /** 真正把 zoom 写进去，并按 anchorTick 保持画面锚点不动。 */
+    private fun applyZoomNow(newZoom: Float, anchorTick: Int) {
         val oldBw = barWidth()
         val anchorScreenX = headerWidth + (anchorTick * oldBw / Note.BAR) - scrollX
-        zoom = target
+        zoom = newZoom
         val newBw = barWidth()
-        // 让 anchorTick 在新缩放下仍落在 anchorScreenX
         val desired = headerWidth + (anchorTick * newBw / Note.BAR) - anchorScreenX
         scrollX = desired.coerceAtLeast(0f)
-        scanCache.clear()
+        // 放大后总宽度变化，滚动范围要跟着更新
+        scrollX = scrollX.coerceIn(0f, maxScrollX())
         invalidate()
+    }
+
+    private fun maxScrollX(): Float {
+        val p = project ?: return Float.MAX_VALUE
+        val totalW = p.lengthTicks() * barWidth() / Note.BAR
+        return max(0f, totalW - (width - headerWidth))
     }
 
     /** 工具栏用：按倍数缩放，锚定在屏幕中心。 */

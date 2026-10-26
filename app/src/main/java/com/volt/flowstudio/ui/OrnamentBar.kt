@@ -4,29 +4,35 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.util.AttributeSet
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.sin
 
 /**
- * 顶部摆件条：导航栏右侧那一点空位。
+ * 顶部音乐摆件条。
  *
- * 为什么要有它：导航栏左侧是菜单 + 标题，右侧只有一个「1 / 4」页码，
- * 中间那一大片在宽屏上是纯色。这块地方不承担功能，放一排会呼吸的小装置
- * 刚好——既填满了空白，又给编辑器一点"设备在运转"的活气。
+ * 上一版放的是磁带卷盘 + 唱针臂：体积小、线条细，缩在导航栏右边一小块，
+ * 实际看下来"看不出是什么东西"，只是占位。这一版换成三件**大而认得出**的装置：
  *
- * 三个装置（都不接受触摸，纯粹是装饰，不会误触）：
- *   1. 立体声电平：两根细柱，跟着主输出峰值起伏，带峰值保持线。
- *      这是唯一"有用"的一个 —— 扫一眼就知道有没有声音。
- *   2. 唱针臂：播放时缓慢摆向唱片，停止时收回。位置对应播放状态。
- *   3. 磁带卷盘：播放时两个盘按不同半径匀速转，一圈约 3 秒。
+ *   1. 声波环（左侧）
+ *      一圈同心圆弧，随输出电平向外扩散，弧长随响度变长。
+ *      播放时持续起涟漪 —— 三件里最有"生命感"的一个。
  *
- * 全部用 Canvas 直接画，无图片资源、无动画框架、每帧只做几十次绘制调用。
- * 停止播放时不重绘（除了电平），避免白白占 CPU —— 这个 App 是实时音频软件，
- * UI 线程被装饰动画拖慢会直接变成爆音。
+ *   2. 均衡柱（中间，18 根）
+ *      模仿频谱仪：高度 = 电平 × 该位置的理论包络 × 拍点抖动。
+ *      左侧低频高、右侧高频矮但抖得快，这是绝大多数音乐的共同形状。
+ *      不做真 FFT（这一层是装饰），真正在跳，但便宜。
+ *
+ *   3. 黑胶唱片 + 唱臂（右侧，直径吃满整条高度）
+ *      俯视的黑胶：同心沟槽、中心标签、一道跟着播放旋转的高光。
+ *      唱臂播放时落到盘面、停止时抬起。转速按真实播放推进，不是匀速假转。
+ *
+ * 三件都按导航栏整高来画，不再是"一小排图标"。仍然不接受触摸：
+ * 它是装饰，任何误操作都不该由它引起。
  */
 class OrnamentBar @JvmOverloads constructor(
     context: Context,
@@ -39,283 +45,292 @@ class OrnamentBar @JvmOverloads constructor(
     var peakR = 0f
         set(value) { if (abs(field - value) > 0.004f) { field = value; invalidate() } }
 
-    /** 是否在播放：决定唱针与卷盘动不起来。 */
+    /** 是否在播放：决定唱片转不转、唱臂落不落。 */
     var playing = false
-        set(value) {
-            if (field != value) {
-                field = value
-                invalidate()
-            }
-        }
+        set(value) { if (field != value) { field = value; invalidate() } }
 
-    /** 节拍脉冲 0..1：每次重拍由 ticker 置 1，然后自己衰减。 */
+    /** 节拍脉冲 0..1，进拍时置 1 后自行衰减。 */
     var beatPulse = 0f
         set(value) { field = value; invalidate() }
 
-    private val peakHoldL = FloatArray(2) { 0f }
-    private val peakHoldR = FloatArray(2) { 0f }
+    /** 当前拍 0..3（保留给未来的拍点指示）。 */
+    var beatIndex = 0
 
-    /** 唱针目标角度与当前角度（弧度），做平滑过渡而不是瞬间跳。 */
-    private var armAngle = ARM_REST
-    private var reelPhase = 0f
-    private var lastFrameMs = 0L
-    private var grad: LinearGradient? = null
+    /** 播放进度 0..1（保留：唱片转速目前按时间推进，不依赖它）。 */
+    var progress = 0f
+
+    private var lastMs = 0L
+    private var discAngle = 0f
+    private var armProgress = 0f
+
+    /** 每根均衡柱的当前高度，做平滑跟随而不是直接赋值。 */
+    private val barLevel = FloatArray(BAR_COUNT) { 0f }
+
+    private var ripplePhase = 0f
+    private var rippleAmp = 0f
+    private var bgGrad: LinearGradient? = null
 
     companion object {
-        /** 唱针停在唱片外侧时的角度。 */
-        private const val ARM_REST = -0.62f
-        /** 播放时唱针落到唱片上的角度。 */
-        private const val ARM_PLAY = -0.18f
+        private const val BAR_COUNT = 18
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        grad = LinearGradient(
+        bgGrad = LinearGradient(
             0f, 0f, w.toFloat(), 0f,
             intArrayOf(
                 Palette.withAlpha(Palette.SURFACE, 0),
-                Palette.SURFACE,
-                Palette.SURFACE
+                Palette.withAlpha(Palette.SURFACE, 150),
+                Palette.withAlpha(Palette.PANEL, 90),
             ),
-            floatArrayOf(0f, 0.12f, 1f),
+            floatArrayOf(0f, 0.30f, 1f),
             Shader.TileMode.CLAMP
         )
-        lastFrameMs = 0L
+        lastMs = 0L
     }
 
     override fun onDraw(canvas: Canvas) {
         val now = System.currentTimeMillis()
-        val dt = if (lastFrameMs == 0L) 0f else ((now - lastFrameMs).coerceIn(0, 120) / 1000f)
-        lastFrameMs = now
+        val dt = if (lastMs == 0L) 0.016f else ((now - lastMs).coerceIn(0, 80) / 1000f)
+        lastMs = now
 
         val w = width.toFloat()
         val h = height.toFloat()
-        if (w < dp(60f) || h < dp(12f)) return
+        if (w < dp(40f) || h < dp(14f)) return
 
-        // 底：从透明过渡到 SURFACE，让摆件看起来"长"在导航栏里而不是贴上去
-        b.fill.shader = grad
-        b.fill.style = Paint.Style.FILL
-        canvas.drawRect(0f, 0f, w, h, b.fill)
-        b.fill.shader = null
+        // 整条底层：从左透明过渡到右侧微亮，让三件摆件像贴在一条玻璃带上
+        bgGrad?.let {
+            b.fill.shader = it
+            b.fill.style = Paint.Style.FILL
+            canvas.drawRect(0f, 0f, w, h, b.fill)
+            b.fill.shader = null
+        }
 
         val cy = h * 0.5f
-        val pad = dp(8f)
+        val amp = ((peakL + peakR) * 0.5f).coerceIn(0f, 1f)
 
-        // ------------------------------------------------------------------ 电平
-        // 从右往左排：电平贴最右，靠页码；然后卷盘；然后唱针。
-        val meterW = dp(30f)
-        val meterRight = w - pad
-        val meterLeft = meterRight - meterW
-        drawMeter(canvas, meterLeft, meterRight, cy, h)
-
-        // 卷盘：两个小圆盘
-        val reelR = (h * 0.30f).coerceIn(dp(4f), dp(11f))
-        val reelGap = reelR * 2.4f
-        val reelRight = meterLeft - dp(14f)
-        val reelL1 = reelRight - reelGap * 1.6f
-        val reelL2 = reelRight - reelGap * 0.4f
-
-        // 播放时卷盘转，速度与 reelPhase 一起推进；停止时停在当前角度不动。
-        if (playing && dt > 0f) {
-            reelPhase += dt * 2.1f          // 约 3 秒一圈
-            if (reelPhase > 1000f) reelPhase -= 1000f
+        // 动画推进：只有播放时才动，停着就冻住（省 CPU）
+        if (playing) {
+            discAngle += dt * 118f          // 约 3 秒一圈
+            if (discAngle >= 360f) discAngle -= 360f
+            ripplePhase += dt * 0.85f
+            if (ripplePhase >= 1f) ripplePhase -= 1f
         }
-        drawReel(canvas, reelL1, cy, reelR, reelPhase)
-        drawReel(canvas, reelL2, cy, reelR, reelPhase)
+        rippleAmp += (amp - rippleAmp) * 0.16f
 
-        // 两盘之间的磁带弧线（只是示意：上凸的一条浅弧）
-        if (reelR > dp(5f)) {
-            b.stroke.color = Palette.withAlpha(Palette.LINE, 120)
-            b.stroke.strokeWidth = dp(0.8f)
-            val path = Path()
-            val topY = cy - reelR * 0.55f
-            path.moveTo(reelL1, topY)
-            path.quadTo((reelL1 + reelL2) * 0.5f, topY - reelR * 0.45f, reelL2, topY)
-            canvas.drawPath(path, b.stroke)
+        // ---- 从右往左布局：唱片贴右，均衡柱居中，声波环在左 ----
+        val pad = dp(6f)
+
+        // 3) 唱片：直径吃满高度的 88%
+        val discR = (h * 0.44f).coerceIn(dp(9f), dp(30f))
+        val discCx = w - pad - discR
+        drawVinyl(canvas, discCx, cy, discR)
+
+        // 2) 均衡柱：占据唱片左边剩余宽度（最多条宽的 44%）
+        val barsRight = discCx - discR - dp(10f)
+        val barsLeft = max(dp(6f), barsRight - w * 0.44f)
+        if (barsRight - barsLeft > dp(18f)) {
+            drawEqBars(canvas, barsLeft, barsRight, cy, h, amp, dt)
         }
 
-        // ------------------------------------------------------------------ 脉冲点阵
-        // 四颗小圆点代表四拍，当前拍最亮并向两侧扩散。
-        // 这是 DAW 里最省地方又能一眼看出"在第几拍"的元件。
-        val dotRight = reelL1 - dp(16f)
-        val dotGap = dp(5.4f)
-        val dotR = dp(1.6f)
-        drawBeatDots(canvas, dotRight, cy - h * 0.13f, dotGap, dotR)
-
-        // ------------------------------------------------------------------ 频谱
-        // 极窄的三段频谱（低/中/高），高度跟主输出电平相关。
-        // 不做真 FFT：这一层是装饰，实频谱在混音台页面里有。
-        drawMiniSpectrum(canvas, dotRight - dotGap * 3.6f - dp(9f), cy, h)
-
-        // ------------------------------------------------------------------ 唱针
-        val armRight = reelL1 - dp(14f)
-        val armLen = (h * 0.52f).coerceIn(dp(6f), dp(15f))
-        val armLeft = armRight - armLen * 1.5f
-        if (armRight > armLeft + dp(4f)) {
-            // 平滑靠近目标角：播放时落到唱片上，停止时收回。
-            // 用固定的插值系数而不是 dt 相关，这样掉帧时也不会跳变。
-            val target = if (playing) ARM_PLAY else ARM_REST
-            armAngle += (target - armAngle) * 0.12f
-            drawTonearm(canvas, armLeft, armRight, cy, armLen)
+        // 1) 声波环：最左侧
+        val ringR = (h * 0.40f).coerceIn(dp(8f), dp(26f))
+        val ringCx = barsLeft - dp(8f) - ringR
+        if (ringCx - ringR > 0f) {
+            drawSoundRing(canvas, ringCx, cy, ringR, amp)
         }
+    }
+
+    // ------------------------------------------------------------------ 声波环
+
+    private fun drawSoundRing(canvas: Canvas, cx: Float, cy: Float, baseR: Float, amp: Float) {
+        // 中心实心点：进拍时更亮
+        val beatBright = if (playing) (0.55f + beatPulse * 0.45f) else 0.35f
+        b.fill.color = Palette.withAlpha(
+            Palette.ACCENT, (200 * beatBright).toInt().coerceIn(60, 235)
+        )
+        b.fill.style = Paint.Style.FILL
+        canvas.drawCircle(cx, cy, baseR * 0.30f, b.fill)
+
+        // 中心外光晕
+        val glow = RadialGradient(
+            cx, cy, baseR * 1.08f,
+            intArrayOf(
+                Palette.withAlpha(Palette.ACCENT, (70 + 90 * amp).toInt().coerceIn(0, 255)),
+                0x00000000,
+            ),
+            floatArrayOf(0f, 1f), Shader.TileMode.CLAMP
+        )
+        b.fill.shader = glow
+        canvas.drawCircle(cx, cy, baseR * 1.08f, b.fill)
+        b.fill.shader = null
+
+        // 三道同心弧：半径随相位外扩，弧长随响度变长
+        b.stroke.style = Paint.Style.STROKE
+        b.stroke.strokeCap = Paint.Cap.ROUND
+        for (k in 0 until 3) {
+            val phase = (ripplePhase + k * 0.333f) % 1f
+            val rr = baseR * (0.52f + phase * 0.52f + amp * 0.10f)
+            val alpha = ((1f - phase) * (70 + 130 * rippleAmp)).toInt().coerceIn(0, 220)
+            if (alpha <= 4) continue
+            b.stroke.color = Palette.withAlpha(Palette.ACCENT, alpha)
+            b.stroke.strokeWidth = (dp(1.5f) - k * dp(0.25f)).coerceAtLeast(dp(0.6f))
+            val sweep = 90f + 240f * rippleAmp
+            canvas.drawArc(
+                cx - rr, cy - rr, cx + rr, cy + rr,
+                -sweep / 2f - 90f, sweep, false, b.stroke
+            )
+        }
+        b.stroke.strokeCap = Paint.Cap.BUTT
+        b.stroke.style = Paint.Style.FILL
+    }
+
+    // ------------------------------------------------------------------ 均衡柱
+
+    /**
+     * 频谱柱。
+     *
+     * 目标高度 = 电平 × 理论包络 × 拍点抖动。
+     * 抖动用基于拍点与位置的确定性函数，不是每帧纯随机 ——
+     * 纯随机看起来是"闪烁的噪点"，不是"音乐在跳"。
+     */
+    private fun drawEqBars(
+        canvas: Canvas, left: Float, right: Float, cy: Float, h: Float,
+        amp: Float, dt: Float
+    ) {
+        val totalW = right - left
+        val gap = dp(1.5f)
+        val barW = ((totalW - gap * (BAR_COUNT - 1)) / BAR_COUNT).coerceAtLeast(dp(1f))
+        val maxH = h * 0.62f
+        val baseline = cy + maxH * 0.5f
+
+        for (i in 0 until BAR_COUNT) {
+            val t = i.toFloat() / (BAR_COUNT - 1)          // 0=低频 1=高频
+            // 理论包络：低频高、中频略降、高频再抬一点（镲与齿音）
+            val envelope = (0.95f - 0.55f * t + 0.22f * t * t * t).coerceIn(0.18f, 1f)
+            val wobble = 0.72f + 0.28f * sin(
+                (beatPulse * 6.28f + i * 0.9f + ripplePhase * 3.1f * (0.5f + t)).toDouble()
+            ).toFloat()
+            val target = (amp * envelope * wobble).coerceIn(0f, 1f)
+
+            // 平滑跟随：上升快、下降慢（电平表的常见观感）
+            val cur = barLevel[i]
+            barLevel[i] = if (target > cur) cur + (target - cur) * 0.55f
+                          else cur + (target - cur) * (0.10f + dt * 2f)
+
+            val v = barLevel[i]
+            if (v < 0.012f) continue
+
+            val bh = (maxH * v).coerceAtLeast(dp(1f))
+            val x = left + i * (barW + gap)
+            val color = when {
+                v > 0.82f -> Palette.RED
+                v > 0.60f -> Palette.YELLOW
+                v > 0.38f -> Palette.withAlpha(Palette.ACCENT, 235)
+                else -> Palette.withAlpha(Palette.ACCENT_DIM, 220)
+            }
+            rect(canvas, x, baseline - bh, x + barW, baseline, color, barW * 0.34f)
+        }
+
+        // 基线：让柱子看起来长在一条线上
+        line(canvas, left, baseline + dp(1f), right, baseline + dp(1f),
+            Palette.withAlpha(Palette.LINE, 110), dp(0.7f))
+    }
+
+    // ------------------------------------------------------------------ 黑胶
+
+    private fun drawVinyl(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+        // 盘体
+        b.fill.color = 0xFF0B0D11.toInt()
+        b.fill.style = Paint.Style.FILL
+        canvas.drawCircle(cx, cy, r, b.fill)
+
+        // 沟槽：同心细环，越向外越关键（黑胶的真实特征）
+        b.stroke.style = Paint.Style.STROKE
+        b.stroke.strokeWidth = dp(0.6f)
+        var rr = r * 0.42f
+        var k = 0
+        while (rr < r * 0.97f) {
+            b.stroke.color = Palette.withAlpha(0xFFFFFF, if (k % 2 == 0) 40 else 22)
+            canvas.drawCircle(cx, cy, rr, b.stroke)
+            rr += r * 0.055f
+            k++
+        }
+
+        // 旋转高光：一道跟着盘转的亮斑 —— "它在转"直接看得见
+        if (playing) {
+            val rad = Math.toRadians(discAngle.toDouble())
+            val lx = cx + cos(rad).toFloat() * r * 0.70f
+            val ly = cy + sin(rad).toFloat() * r * 0.70f
+            val g = RadialGradient(
+                lx, ly, r * 0.5f,
+                intArrayOf(Palette.withAlpha(0xFFFFFF, 46), 0x00000000),
+                floatArrayOf(0f, 1f), Shader.TileMode.CLAMP
+            )
+            b.fill.shader = g
+            canvas.drawCircle(cx, cy, r * 0.97f, b.fill)
+            b.fill.shader = null
+        }
+
+        // 中心标签
+        b.fill.color = Palette.withAlpha(Palette.ACCENT_DIM, 230)
+        canvas.drawCircle(cx, cy, r * 0.36f, b.fill)
+        b.fill.color = Palette.withAlpha(Palette.PANEL, 240)
+        canvas.drawCircle(cx, cy, r * 0.28f, b.fill)
+        b.fill.color = 0xFF06080A.toInt()
+        canvas.drawCircle(cx, cy, r * 0.075f, b.fill)
+        b.fill.color = Palette.withAlpha(0xFFFFFF, 16)
+        canvas.drawCircle(cx - r * 0.10f, cy - r * 0.11f, r * 0.20f, b.fill)
+
+        drawTonearm(canvas, cx, cy, r)
+        b.stroke.style = Paint.Style.FILL
     }
 
     /**
-     * 立体声电平：两条细柱，底部固定，高度跟峰值。
-     * 峰值保持线会在峰值处停留几帧再落下 —— 瞬态一闪而过时这正是想要的。
+     * 唱臂：支点在唱片右上方（盘外），臂身指向盘心。
+     * 角度在"停靠"与"落针"之间平滑过渡。
      */
-    private fun drawMeter(canvas: Canvas, left: Float, right: Float, cy: Float, h: Float) {
-        val barW = dp(2.4f)
-        val gap = dp(2.2f)
-        val top = cy - h * 0.26f
-        val bottom = cy + h * 0.26f
-        val len = bottom - top
+    private fun drawTonearm(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+        val pivotX = cx + r * 0.92f
+        val pivotY = cy - r * 0.86f
 
-        // 两条柱的左边界：右侧柱贴右
-        val rX = right - barW
-        val lX = rX - gap - barW
+        val target = if (playing) 1f else 0f
+        armProgress += (target - armProgress) * 0.10f
 
-        // 轨道（未点亮时的底色）
-        rect(canvas, lX, top, lX + barW, bottom, Palette.withAlpha(Palette.LINE, 90), barW * 0.5f)
-        rect(canvas, rX, top, rX + barW, bottom, Palette.withAlpha(Palette.LINE, 90), barW * 0.5f)
+        val restAngle = Math.toRadians(118.0).toFloat()
+        val playAngle = Math.toRadians(146.0).toFloat()
+        val ang = restAngle + (playAngle - restAngle) * armProgress
 
-        // 实际电平
-        drawMeterBar(canvas, lX, top, bottom, len, barW, peakL, 0)
-        drawMeterBar(canvas, rX, top, bottom, len, barW, peakR, 1)
-    }
+        val len = r * 1.38f
+        val tipX = pivotX + cos(ang) * len
+        val tipY = pivotY + sin(ang) * len
 
-    private fun drawMeterBar(
-        canvas: Canvas, x: Float, top: Float, bottom: Float,
-        len: Float, barW: Float, value: Float, side: Int
-    ) {
-        val v = value.coerceIn(0f, 1f)
-        // 峰值保持：上升立刻跟上，下降慢慢落
-        val hold = if (side == 0) peakHoldL else peakHoldR
-        if (v >= hold[0]) {
-            hold[0] = v
-            hold[1] = 0f
-        } else {
-            hold[1] += 1f
-            if (hold[1] > 8f) hold[0] = (hold[0] - 0.03f).coerceAtLeast(v)
-        }
-
-        if (v > 0.005f) {
-            val hh = len * v
-            // 颜色按电平分档：绿 → 黄 → 红。这是混音台的通用语言。
-            val color = when {
-                v > 0.92f -> Palette.RED
-                v > 0.72f -> Palette.YELLOW
-                else -> Palette.GREEN
-            }
-            rect(canvas, x, bottom - hh, x + barW, bottom, color, barW * 0.5f)
-        }
-
-        // 保持线
-        if (hold[0] > 0.02f) {
-            val hy = bottom - len * hold[0]
-            val c = if (hold[0] > 0.92f) Palette.RED else Palette.withAlpha(Palette.TEXT, 170)
-            rect(canvas, x, hy, x + barW, hy + dp(1f), c)
-        }
-    }
-
-    /** 磁带卷盘：外圈 + 中心轴 + 三根辐条，辐条随相位转。 */
-    private fun drawReel(canvas: Canvas, cx: Float, cy: Float, r: Float, phase: Float) {
-        // 外圈
-        b.stroke.color = Palette.withAlpha(Palette.ACCENT_DIM, 200)
-        b.stroke.strokeWidth = dp(1f)
-        canvas.drawCircle(cx, cy, r, b.stroke)
-
-        // 中心轴
-        b.fill.color = Palette.withAlpha(Palette.ACCENT, if (playing) 210 else 120)
-        b.fill.style = Paint.Style.FILL
-        canvas.drawCircle(cx, cy, r * 0.24f, b.fill)
-
-        // 辐条：只有转起来才画，静止时留白显得"停机"
-        if (r > dp(5f)) {
-            b.stroke.color = Palette.withAlpha(Palette.ACCENT_DIM, if (playing) 170 else 70)
-            b.stroke.strokeWidth = dp(0.8f)
-            for (k in 0 until 3) {
-                val a = phase + k * 2.0944f
-                val x1 = cx + cos(a) * r * 0.28f
-                val y1 = cy + sin(a) * r * 0.28f
-                val x2 = cx + cos(a) * r * 0.88f
-                val y2 = cy + sin(a) * r * 0.88f
-                canvas.drawLine(x1, y1, x2, y2, b.stroke)
-            }
-        }
-    }
-
-    /** 唱针臂：一根从左侧枢轴斜向右下的杆 + 末端配重。 */
-    private fun drawTonearm(canvas: Canvas, left: Float, right: Float, cy: Float, len: Float) {
-        // 枢轴在左边
-        val px = left
-        val py = cy - len * 0.35f
-
-        b.stroke.color = Palette.withAlpha(Palette.TEXT_DIM, if (playing) 210 else 120)
-        b.stroke.strokeWidth = dp(1.4f)
+        b.stroke.style = Paint.Style.STROKE
         b.stroke.strokeCap = Paint.Cap.ROUND
+        b.stroke.color = Palette.withAlpha(Palette.TEXT_DIM, 200)
+        b.stroke.strokeWidth = dp(2.2f)
+        canvas.drawLine(pivotX, pivotY, tipX, tipY, b.stroke)
 
-        val ex = px + cos(armAngle) * len * 1.5f
-        val ey = py + sin(armAngle) * len * 1.5f
-        canvas.drawLine(px, py, ex, ey, b.stroke)
-
-        // 枢轴圆点
-        b.fill.color = Palette.withAlpha(Palette.TEXT_FAINT, 200)
+        b.fill.color = Palette.withAlpha(Palette.TEXT_DIM, 235)
         b.fill.style = Paint.Style.FILL
-        canvas.drawCircle(px, py, dp(1.6f), b.fill)
+        canvas.drawCircle(pivotX, pivotY, dp(2.6f), b.fill)
+        b.fill.color = Palette.withAlpha(Palette.PANEL, 255)
+        canvas.drawCircle(pivotX, pivotY, dp(1.1f), b.fill)
 
-        // 唱头（末端小方块）
-        b.fill.color = Palette.withAlpha(if (playing) Palette.ACCENT else Palette.TEXT_FAINT, 220)
-        val hs = dp(1.9f)
-        canvas.drawRect(ex - hs, ey - hs, ex + hs, ey + hs, b.fill)
+        // 唱头
+        b.stroke.color = if (playing) Palette.ACCENT else Palette.TEXT_FAINT
+        b.stroke.strokeWidth = dp(3.4f)
+        canvas.drawLine(
+            tipX, tipY,
+            tipX + cos(ang) * dp(3f), tipY + sin(ang) * dp(3f),
+            b.stroke
+        )
 
         b.stroke.strokeCap = Paint.Cap.BUTT
+        b.stroke.style = Paint.Style.FILL
     }
 
-    /** 四拍点阵：当前拍实心高亮，其余渐暗；播放时整体有轻微呼吸。 */
-    private fun drawBeatDots(canvas: Canvas, rightX: Float, y: Float, gap: Float, r: Float) {
-        val cur = (beatIndex % 4).coerceIn(0, 3)
-        for (k in 0 until 4) {
-            val cx = rightX - (3 - k) * gap
-            val isCur = k == cur && playing
-            val baseA = if (isCur) 235 else 70
-            // 脉冲让当前拍那一颗略大
-            val rr = if (isCur) r * (1f + beatPulse * 0.55f) else r
-            b.fill.color = Palette.withAlpha(if (isCur) Palette.ACCENT else Palette.TEXT_FAINT, baseA)
-            b.fill.style = Paint.Style.FILL
-            canvas.drawCircle(cx, y, rr, b.fill)
-        }
-    }
-
-    /** 三段迷你频谱：低频最粗、高频最细，高度随电平起伏。 */
-    private fun drawMiniSpectrum(canvas: Canvas, rightX: Float, cy: Float, h: Float) {
-        val barW = dp(1.7f)
-        val gap = dp(1.9f)
-        val maxH = h * 0.22f
-        val lv = listOf(peakL * 1.05f, (peakL + peakR) * 0.44f, peakR * 0.82f)
-        for (k in 0 until 3) {
-            val x = rightX - (2 - k) * (barW + gap)
-            val v = lv[k].coerceIn(0f, 1f)
-            // 底部对齐，高度至少留 1.2dp 让"有这条"可见
-            val bh = (maxH * v).coerceAtLeast(dp(1.2f))
-            val col = when {
-                v > 0.9f -> Palette.RED
-                v > 0.68f -> Palette.YELLOW
-                else -> Palette.ACCENT
-            }
-            rect(canvas, x, cy + dp(2f) - bh, x + barW, cy + dp(2f),
-                Palette.withAlpha(col, 200), barW * 0.5f)
-        }
-    }
-
-    /** 当前是第几拍（由 ticker 喂），用于四拍点阵。 */
-    var beatIndex = 0
-
-    /**
-     * 只有播放中、或电平还在变的时候才持续刷新。
-     * 静止时不请求下一帧 —— 装饰不该在没人看的时候烧 CPU。
-     */
+    /** 静止且无信号时不请求下一帧：装饰不能和音频线程抢 CPU。 */
     fun needsAnimation(): Boolean =
-        playing || beatPulse > 0.01f || peakL > 0.004f || peakR > 0.004f ||
-            peakHoldL[0] > 0.02f || peakHoldR[0] > 0.02f ||
-            abs(armAngle - (if (playing) ARM_PLAY else ARM_REST)) > 0.01f
+        playing || rippleAmp > 0.01f || peakL > 0.004f || peakR > 0.004f ||
+            abs(armProgress - (if (playing) 1f else 0f)) > 0.01f
 }

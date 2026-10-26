@@ -37,7 +37,7 @@ class KeyboardView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.BG)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         val whiteKeys = (0 until noteCount).count { !isBlack(it + lowestNote) }
         if (whiteKeys == 0) return
@@ -79,7 +79,7 @@ class KeyboardView @JvmOverloads constructor(
 
         // 鼓组时换成打击垫外观
         if (isDrum) {
-            canvas.drawColor(Palette.BG)
+            canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
             val cols = 4
             val rows = 4
             val cw = w / cols

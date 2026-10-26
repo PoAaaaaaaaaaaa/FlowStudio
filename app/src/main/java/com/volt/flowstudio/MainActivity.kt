@@ -65,6 +65,11 @@ class MainActivity : Activity() {
     /** 应用设置（背景图、摆件、常亮等）。与工程无关，独立持久化。 */
     private lateinit var settings: com.volt.flowstudio.session.AppSettings
     private var backgroundView: com.volt.flowstudio.ui.StudioBackground? = null
+    /** 底部音乐数值表：位置 / BPM / 调 / 和声 / 规模 / 发声数 */
+    private var readout: com.volt.flowstudio.ui.MusicReadout? = null
+    /** 每个小节推导出的和弦，换工程或改音符时重算 */
+    private var chordByBar: Map<Int, String> = emptyMap()
+    private var chordCacheKey = ""
     private var settingsWindow: com.volt.flowstudio.ui.SettingsWindow? = null
     /** 摆件四拍点阵：上一次的拍号，用来检测"进新拍" */
     private var lastOrnamentBeat = -1
@@ -240,7 +245,7 @@ class MainActivity : Activity() {
         keyboardHeight = dp(if (hDp < 700f) 76 else 92)
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
 
-        val root = FrameLayout(this).apply { setBackgroundColor(Palette.BG) }
+        val root = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.TRANSPARENT) }
         val bg = StudioBackground(this)
         backgroundView = bg
         root.addView(bg, matchParams())
@@ -312,9 +317,10 @@ class MainActivity : Activity() {
         // 既填了空白又能扫一眼看到有没有声音。不接受触摸，不会误触。
         val deco = com.volt.flowstudio.ui.OrnamentBar(this)
         ornament = deco
-        // 加宽以容纳新增的四拍点阵与迷你频谱。窄屏 128、宽屏 156。
+        // 三件大装置（声波环 + 18 根均衡柱 + 黑胶）需要更多横向空间。
+        // 窄屏 150dp，宽屏取剩余宽度的合适比例。
         bar.addView(deco, android.widget.LinearLayout.LayoutParams(
-            dp(if (portrait) 128 else 156), android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+            dp(if (portrait) 150 else 190), android.widget.LinearLayout.LayoutParams.MATCH_PARENT
         ))
         deco.visibility = if (settings.showOrnaments) View.VISIBLE else View.GONE
 
@@ -345,6 +351,16 @@ class MainActivity : Activity() {
         transportBarView = transportBar
         column.addView(transportBar, android.widget.LinearLayout.LayoutParams(
             android.widget.LinearLayout.LayoutParams.MATCH_PARENT, transportH
+        ))
+
+        // ---- 3b. 音乐数值表 ----------------------------------------
+        // 走带条下面还有一条窄带，原本是空白。这里放一行实时读数：
+        // 位置 / BPM / 调 / 和声 / 长度 / 通道 / 音符 / 发声数。
+        // 编曲时最常要确认的数字都在这一条里，不用点开任何面板。
+        val ro = com.volt.flowstudio.ui.MusicReadout(this)
+        readout = ro
+        column.addView(ro, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dp(22)
         ))
 
 
@@ -873,6 +889,31 @@ class MainActivity : Activity() {
 
         // 顶部摆件：电平与播放状态。只在这里喂数据，绘制开销都在 OrnamentBar 内部，
         // 且它自己判断"要不要继续动画"——静止时不重绘。
+        // 底部数值表
+        readout?.let { ro ->
+            val p = session.project
+            ro.positionTicks = pos
+            ro.barTicks = p.barTicks
+            ro.bpm = p.bpm
+            ro.totalBars = p.lengthBars()
+            ro.trackCount = p.tracks.size
+            ro.patternCount = p.patterns.size
+            ro.noteCount = p.patterns.sumOf { it.noteCount() }
+            ro.playing = session.isPlaying()
+            ro.voices = session.engine.trackLevels().count { it > 8 }
+            ro.keyLabel = if (p.scaleName.isNotEmpty() && p.scaleName != "chromatic")
+                "${p.keyRoot} ${p.scaleName}" else p.keyRoot
+
+            // 和弦只在内容变了的时候重算 —— 每帧算一遍没必要
+            val key = "${p.lengthTicks()}:${ro.noteCount}:${p.clips.size}"
+            if (key != chordCacheKey) {
+                chordCacheKey = key
+                chordByBar = computeChords(p)
+            }
+            val curBar = pos / p.barTicks.coerceAtLeast(1)
+            ro.chordLabel = chordByBar[curBar] ?: ""
+        }
+
         ornament?.let { o ->
             val pk = session.engine.masterPeak()
             o.peakL = pk.getOrElse(0) { 0f }
@@ -1241,10 +1282,53 @@ class MainActivity : Activity() {
     }
 
     /** 把设置里的背景图贴到底层 StudioBackground。没有就回到默认渐变。 */
+    /**
+     * 从工程内容推导每小节的和弦。
+     *
+     * 取每个小节窗口内所有"正在响"的音符（含跨小节的持续音），
+     * 折成音级集合后交给 ChordDetect 做模板匹配。
+     *
+     * 音频片段不参与：那是成品波形，反推和弦没有意义。
+     */
+    private fun computeChords(p: com.volt.flowstudio.model.Project): Map<Int, String> {
+        val bt = p.barTicks.coerceAtLeast(1)
+        val totalBars = p.lengthBars().coerceAtMost(256)
+        if (totalBars <= 0) return emptyMap()
+
+        // 把时间线上的片段展开成音符区间
+        val notes = ArrayList<Triple<Int, Int, Int>>()
+        for (clip in p.clips) {
+            if (clip.isAudio) continue
+            val pat = p.patternById(clip.patternId) ?: continue
+            for ((track, list) in pat.tracks) {
+                if (track != clip.track) continue
+                for (n in list) {
+                    val s = clip.start + n.start - clip.offset
+                    val e = s + n.length
+                    if (e > clip.start && s < clip.end) {
+                        notes.add(Triple(n.pitch, s, e))
+                    }
+                }
+            }
+        }
+        if (notes.isEmpty()) return emptyMap()
+        return com.volt.flowstudio.ui.ChordDetect.detectByBar(notes, bt, totalBars)
+    }
+
     private fun applyBackground() {
         val bg = backgroundView ?: return
         bg.dim = settings.dimBackground
-        bg.backgroundImage = settings.loadBackground()
+        val bmp = settings.loadBackground()
+        bg.backgroundImage = bmp
+        // 关键一步：内容 View 的底色要不要让位。
+        // 不设这个开关，机架/卷帘/混音/编排的开屏 drawColor(Palette.BG)
+        // 会把背景图整块盖掉 —— 那正是"设置成功但没效果"的原因。
+        com.volt.flowstudio.ui.CanvasBackdrop.showThrough = bmp != null
+        bg.invalidate()
+        // 所有页面都要重绘一次才能看到新底色
+        content?.invalidate()
+        rootLayout?.invalidate()
+        refreshAll(session.project)
     }
 
     private fun applyKeepAwake() {

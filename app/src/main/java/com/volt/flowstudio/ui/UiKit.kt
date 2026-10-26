@@ -111,6 +111,31 @@ class Brushes {
 }
 
 /** 提供 dp 换算与通用绘制。 */
+/**
+ * 全局"底层背景可见"开关。
+ *
+ * 用户设了自定义背景图时，它画在最底层的 StudioBackground 上；
+ * 但各个内容 View（编排 / 机架 / 卷帘 / 混音）开头都做了
+ * canvas.drawColor(Palette.BG) —— 一块不透明的深色，会把背景彻底盖住。
+ * 这正是"设置成功但看不到效果"的原因。
+ *
+ * 与其在十几个 View 里各改一遍，这里放一个进程级的开关：
+ * 打开后所有 BaseView 子类的底色绘制都会被换成半透明，
+ * 让背景图透上来，同时仍保留足够的压暗来保证内容可读。
+ */
+object CanvasBackdrop {
+    /** 是否有自定义背景图需要透出来。 */
+    @Volatile
+    var showThrough: Boolean = false
+
+    /** 底色绘制用的颜色：透出背景时用半透明黑，否则用原来的实色。 */
+    fun base(original: Int): Int =
+        if (showThrough) (original and 0x00FFFFFF) or 0xB8000000.toInt() else original
+
+    /** canvas.drawColor 的统一入口。 */
+    fun fillColor(original: Int): Int = base(original)
+}
+
 abstract class BaseView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,

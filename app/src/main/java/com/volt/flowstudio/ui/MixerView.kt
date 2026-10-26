@@ -52,7 +52,7 @@ class MixerView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Palette.BG)
+        canvas.drawColor(CanvasBackdrop.fillColor(Palette.BG))
 
         val p = project ?: return
         masterW = dp(78f)
