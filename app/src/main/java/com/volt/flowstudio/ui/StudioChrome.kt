@@ -70,16 +70,73 @@ class WallpaperView @JvmOverloads constructor(
     var dim = true
         set(value) { if (field != value) { field = value; invalidate() } }
 
+    /**
+     * 背景风格：把原来烘焙进像素的那几层搬到运行时来控制。
+     *
+     * 1.38 重构的核心 —— 旧实现选图时就把去饱和、上下渐变、色染、光斑
+     * 全部画进位图存盘，于是：
+     *   · 参数不可调（想亮一点只能重选图）
+     *   · 比例被焊死成 1440×2560，横屏平板必然错位
+     *   · 每次换尺寸都要重缩放，锯齿就是这么来的
+     *
+     * 现在这些都变成可控字段，onDraw 里按**当前实际尺寸**现算。
+     * 默认值与旧视觉一致，用户看不出突变，但从此每一项都能调。
+     */
+    /** 去饱和程度：1=原色，0=完全灰。0.60 是旧版烘焙时用的值。 */
+    var saturation = 0.60f
+        set(value) { if (field != value) { field = value.coerceIn(0f, 1f); rebuildFilters(); invalidate() } }
+
+    /** 上下渐变压暗的强度倍率：1=旧版，0=不要渐变。 */
+    var vignette = 1f
+        set(value) { if (field != value) { field = value.coerceIn(0f, 2f); invalidate() } }
+
+    /** 主题色染色强度：旧版是 alpha 15，这里用 0..1 的比例表达。 */
+    var tint = 0.06f
+        set(value) { if (field != value) { field = value.coerceIn(0f, 1f); invalidate() } }
+
+    /** 右上角光斑强度：旧版 alpha 0x1E。 */
+    var glow = 0.12f
+        set(value) { if (field != value) { field = value.coerceIn(0f, 1f); invalidate() } }
+
     private val imgMatrix = Matrix()
     private val imgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val dimPaint = Paint()
     private val gradPaint = Paint()
+    private val overlayPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /** 去饱和的 ColorMatrix 过滤器。参数变了要重建。 */
+    private var satFilter: android.graphics.ColorFilter? = null
+
+    init {
+        rebuildFilters()
+    }
+
+    private fun rebuildFilters() {
+        val inv = 1f - saturation
+        val r = 0.213f * inv
+        val g = 0.715f * inv
+        val b = 0.072f * inv
+        val cm = android.graphics.ColorMatrix(floatArrayOf(
+            r + saturation, g, b, 0f, 0f,
+            r, g + saturation, b, 0f, 0f,
+            r, g, b + saturation, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f,
+        ))
+        satFilter = android.graphics.ColorMatrixColorFilter(cm)
+        imgPaint.colorFilter = satFilter
+    }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         rebuildMatrix()
     }
 
-    /** cover 策略：等比放大到覆盖画布，居中裁切，不拉伸变形。 */
+    /**
+     * cover 策略：等比放大到覆盖画布，居中裁切，不拉伸变形。
+     *
+     * 因为现在存的是**原图**（不再预裁成固定比例），
+     * 这里每次尺寸变化都会重新算一遍 —— 竖屏、横屏、分屏、折叠展开，
+     * 每种比例都能得到正确的裁切，而不是把一张焊死的 9:16 图硬拉。
+     */
     private fun rebuildMatrix() {
         val bmp = backgroundImage ?: return
         val w = width.toFloat()
@@ -88,31 +145,85 @@ class WallpaperView @JvmOverloads constructor(
         val s = maxOf(w / bmp.width, h / bmp.height)
         imgMatrix.setScale(s, s)
         imgMatrix.postTranslate((w - bmp.width * s) * 0.5f, (h - bmp.height * s) * 0.5f)
+        // 强制重建：onDraw 里用 isIdentity 判断会漏掉"已经算过一次但尺寸变了"
     }
 
     override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
         val bmp = backgroundImage
         if (bmp == null || bmp.isRecycled) {
             // 无自定义背景：默认渐变（保留原来的光源方向）
             gradPaint.shader = LinearGradient(
-                0f, 0f, width.toFloat(), height.toFloat(),
+                0f, 0f, w, h,
                 intArrayOf(0xFF12151A.toInt(), 0xFF0D0F13.toInt(), 0xFF0A0C0F.toInt()),
                 floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP
             )
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), gradPaint)
+            canvas.drawRect(0f, 0f, w, h, gradPaint)
             gradPaint.shader = null
             return
         }
 
+        // cover 绘制。矩阵在 onSizeChanged 里算好，这里只在必要时补一次。
         if (imgMatrix.isIdentity) rebuildMatrix()
         canvas.drawBitmap(bmp, imgMatrix, imgPaint)
 
-        // 单一压暗层：这是壁纸与内容之间唯一的暗化。
-        // 开 = 30%，关 = 10%。之前"图内压暗 + 层内压暗 + 内容底压暗"三层相乘
-        // 把 50% 的图压到 9%，用户看到的就是全黑 —— 参数怎么调都不对，
-        // 因为错的是结构。现在只有这一层。
+        // ---- 以下全部按当前尺寸现算，不再烘焙 ----
+
+        // 1) 主题色染色：极淡，让背景与软件配色同源
+        if (tint > 0.001f) {
+            overlayPaint.colorFilter = null
+            overlayPaint.shader = null
+            // 不用 androidx 的 ColorUtils —— 这个项目刻意零 AndroidX 依赖，
+            // 一个 alpha 合成不值得为它引入整个库。
+            val alpha = (tint.coerceIn(0f, 1f) * 255f).toInt()
+            overlayPaint.color = (alpha shl 24) or (Palette.ACCENT and 0x00FFFFFF)
+            canvas.drawRect(0f, 0f, w, h, overlayPaint)
+        }
+
+        // 2) 右上角光斑：避免整张图死平
+        if (glow > 0.001f) {
+            val a = (glow.coerceIn(0f, 1f) * 255f).toInt()
+            overlayPaint.shader = RadialGradient(
+                w * 0.78f, h * 0.16f, maxOf(w, h) * 0.62f,
+                intArrayOf((a shl 24) or 0xFFFFFF, 0x00FFFFFF),
+                null, Shader.TileMode.CLAMP
+            )
+            overlayPaint.color = 0xFFFFFFFF.toInt()
+            canvas.drawRect(0f, 0f, w, h, overlayPaint)
+            overlayPaint.shader = null
+        }
+
+        // 3) 上下渐变压暗：保证 chrome 区（页签、走带条）文字可读。
+        //    强度由 vignette 倍率控制，0 就是完全不要。
+        if (vignette > 0.001f) {
+            val k = vignette.coerceIn(0f, 2f)
+            val topA = (0x3D * k).toInt().coerceIn(0, 255)
+            val botA = (0x55 * k).toInt().coerceIn(0, 255)
+
+            overlayPaint.shader = LinearGradient(
+                0f, 0f, 0f, h * 0.18f,
+                intArrayOf(topA shl 24, 0x00000000),
+                null, Shader.TileMode.CLAMP
+            )
+            overlayPaint.color = 0xFFFFFFFF.toInt()
+            canvas.drawRect(0f, 0f, w, h * 0.18f, overlayPaint)
+
+            overlayPaint.shader = LinearGradient(
+                0f, h * 0.76f, 0f, h,
+                intArrayOf(0x00000000, botA shl 24),
+                null, Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, h * 0.76f, w, h, overlayPaint)
+            overlayPaint.shader = null
+        }
+
+        // 4) 统一压暗：壁纸与内容之间唯一的暗化层。
+        //    开 = 30%，关 = 10%。这一层必须最后画，否则会盖掉上面的渐变与光斑。
         dimPaint.color = if (dim) 0x4D000000 else 0x1A000000
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+        canvas.drawRect(0f, 0f, w, h, dimPaint)
     }
 }
 

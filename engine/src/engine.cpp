@@ -180,6 +180,8 @@ void Engine::resetTails() {
     }
     // 母带平滑器：不清的话音量会从上一首的稳态慢慢爬回来
     masterSm_.reset(0.f);
+    // 限幅增益：跨块累积的成员，不清的话下一首歌的前几秒会带着上一首的压缩状态
+    limiterGain_ = 1.f;
     // 总线缓冲本身也清一遍，避免上一帧的残值被当成新声音
     std::fill(revL_.begin(), revL_.end(), 0.f);
     std::fill(revR_.begin(), revR_.end(), 0.f);
@@ -739,6 +741,24 @@ Engine::RenderResult Engine::renderOffline(double startTick, double endTick, int
 
     // 离线渲染用独立的采样率，需要把滤波器/延迟全部按新采样率重建
     prepare((float)sr, 512);
+
+    // 母带的限幅增益必须复位。
+    //
+    // limiterGain_ 是个跨块累积的成员：实时播放时它一直在跟着信号起伏，
+    // 一首吵的歌播到一半它可能停在 0.6 左右。导出如果不复位，
+    // 整条导出曲线就从"上一刻的压缩状态"起步，然后按 80ms 时间常数慢慢松开 ——
+    // 表现是**导出文件的开头一小段被压得明显偏低，随后又抬起来**，
+    // 听感上就是"音效混乱"（其实是增益包络错位），而且因为起始状态不同，
+    // 同一首歌每导一次的听感都不一样。这就是"导出的音乐音效会混乱"的真因。
+    //
+    // masterSm_ 同理：它平滑总音量，初值必须等于当前目标值，
+    // 否则前 15ms 会从 0 爬上来，开头有一个渐入。
+    limiterGain_ = 1.f;
+    masterSm_.reset(masterVolume_);
+    // 峰值表也清零：导出不该把实时播放的峰值混进来
+    masterPeakL_.store(0.f);
+    masterPeakR_.store(0.f);
+
     setPositionTicks(std::max(0.0, startTick));
     playing_.store(true);
     loop_.store(false);
@@ -794,6 +814,10 @@ Engine::RenderResult Engine::renderOffline(double startTick, double endTick, int
     playing_.store(false);
     loop_.store(oldLoop);
     prepare(oldSr, oldBlock);
+    // prepare 会把 limiterGain_ 留在导出末尾的值上（它不清这个成员），
+    // 回到实时播放时必须复位，否则下一首歌一开播就从上一首的压缩状态起步。
+    limiterGain_ = 1.f;
+    masterSm_.reset(masterVolume_);
     setPositionTicks(oldPos);
     playing_.store(oldPlaying);
     loop_.store(oldLoop);

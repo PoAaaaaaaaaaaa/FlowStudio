@@ -487,6 +487,155 @@ void EffectState::process(float* l, float* r, int n, float sr, float bpm) {
             break;
         }
 
+        // ============================================================
+        // 1.38 追加的五种。全部是经典算法的最小实现，参数语义与
+        // Kotlin 侧 knobName() 一致。
+        // ============================================================
+
+        case EffectType::Compressor2: {
+            // 三段压缩：低频(120Hz 以下) / 中频 / 高频(4kHz 以上) 各自一条包络。
+            // 不分段的话，一记底鼓会把整个人声一起压下去 —— 这是单段压缩
+            // 在多轨母线上最典型的问题。p 依次是 低阈值/中阈值/高阈值/比率。
+            const float thrL = 1.f - clampf(p[0], 0.f, 1.f) * 0.9f;
+            const float thrM = 1.f - clampf(p[1], 0.f, 1.f) * 0.9f;
+            const float thrH = 1.f - clampf(p[2], 0.f, 1.f) * 0.9f;
+            const float ratio = 1.f + clampf(p[3], 0.f, 1.f) * 11.f;   // 1..12
+
+            Svf lpL, lpR, hpL, hpR;
+            lpL.set(120.f, 0.707f, sr);  lpR.set(120.f, 0.707f, sr);
+            hpL.set(4000.f, 0.707f, sr); hpR.set(4000.f, 0.707f, sr);
+            const float rel = 1.f - std::exp(-1.f / (0.12f * sr));
+            const float atk = 1.f - std::exp(-1.f / (0.004f * sr));
+
+            for (int i = 0; i < n; i++) {
+                const float lowL = lpL.process(l[i], 0), lowR = lpR.process(r[i], 0);
+                const float hiL = hpL.process(l[i], 0), hiR = hpR.process(r[i], 0);
+                // 中频 = 原信号 - 低 - 高（近似，交叉点各一阶）
+                const float midL = l[i] - lowL - hiL;
+                const float midR = r[i] - lowR - hiR;
+
+                auto band = [&](float sig, float thr, int k) {
+                    const float pk = std::fabs(sig);
+                    const float target = pk > thr ? thr / pk : 1.f;
+                    float& env = compBandEnv[k];
+                    env += (target < env ? atk : rel) * (target - env);
+                    return sig * env;
+                };
+                const float outL = band(lowL, thrL, 0) + band(midL, thrM, 1) + band(hiL, thrH, 2);
+                const float outR = band(lowR, thrL, 0) + band(midR, thrM, 1) + band(hiR, thrH, 2);
+
+                l[i] = l[i] * dry + outL * wet;
+                r[i] = r[i] * dry + outR * wet;
+            }
+            break;
+        }
+
+        case EffectType::Limiter: {
+            // 砖墙限幅：p0=阈值, p1=释放, p2=前视(0..1 映射到 0..5ms)
+            const float thresh = 0.35f + clampf(p[0], 0.f, 1.f) * 0.64f;   // 0.35..0.99
+            const float relSec = 0.02f + clampf(p[1], 0.f, 1.f) * 0.6f;
+            const float lookMs = clampf(p[2], 0.f, 1.f) * 5.f;
+            const int look = std::max(1, (int)(sr * lookMs * 0.001f));
+            const float rel = 1.f - std::exp(-1.f / (relSec * sr));
+            const float atk = 1.f - std::exp(-1.f / (0.0005f * sr));   // 极快起音
+
+            for (int i = 0; i < n; i++) {
+                // 前视：取未来 look 帧内的峰值来定这一刻的增益
+                float pk = 0.f;
+                for (int k = 0; k < look && i + k < n; k += 4) {
+                    pk = std::max(pk, std::max(std::fabs(l[i + k]), std::fabs(r[i + k])));
+                }
+                pk = std::max(pk, std::max(std::fabs(l[i]), std::fabs(r[i])));
+                const float target = pk > thresh ? thresh / pk : 1.f;
+                limiter2Env += (target < limiter2Env ? atk : rel) * (target - limiter2Env);
+                l[i] = l[i] * dry + l[i] * limiter2Env * wet;
+                r[i] = r[i] * dry + r[i] * limiter2Env * wet;
+            }
+            break;
+        }
+
+        case EffectType::DeEsser: {
+            // 齿音消除：6~9kHz 窄带检测 + 动态衰减。
+            // p0=频率(6k..9k), p1=阈值, p2=衰减深度
+            const float freq = 6000.f + clampf(p[0], 0.f, 1.f) * 3000.f;
+            const float thresh = 0.02f + clampf(p[1], 0.f, 1.f) * 0.3f;
+            const float depth = clampf(p[2], 0.f, 1.f);
+
+            Biquad bpL, bpR;
+            // 齿音带用"高通 + 低通的峰形"近似带通：
+            // 这里没有现成的 bandpass，用 peaking 在目标频率提 Q 更接近原意。
+            bpL.peaking(sr, freq, 0.f, 3.f);
+            bpR.peaking(sr, freq, 0.f, 3.f);
+            // peaking 增益 0dB 等于直通，取不出频带 —— 改用两级一阶：
+            // 6kHz 高通后再 9kHz 低通，得到 6~9k 的带通近似。
+            Biquad bpL2, bpR2;
+            bpL.highPass(sr, freq * 0.75f, 0.707f);
+            bpL2.lowPass(sr, freq * 1.5f, 0.707f);
+            bpR.highPass(sr, freq * 0.75f, 0.707f);
+            bpR2.lowPass(sr, freq * 1.5f, 0.707f);
+            const float rel = 1.f - std::exp(-1.f / (0.05f * sr));
+
+            for (int i = 0; i < n; i++) {
+                const float bandL = bpL2.process(bpL.process(l[i]));
+                const float bandR = bpR2.process(bpR.process(r[i]));
+                const float pk = std::max(std::fabs(bandL), std::fabs(bandR));
+                const float target = pk > thresh ? thresh / pk : 1.f;
+                deEssEnv += (target < deEssEnv ? 0.5f : rel) * (target - deEssEnv);
+                // 只在齿音带内做衰减，其余频段原样通过
+                const float cutL = bandL * (1.f - deEssEnv) * depth;
+                const float cutR = bandR * (1.f - deEssEnv) * depth;
+                l[i] = l[i] * dry + (l[i] - cutL) * wet;
+                r[i] = r[i] * dry + (r[i] - cutR) * wet;
+            }
+            break;
+        }
+
+        case EffectType::Transient: {
+            // 瞬态塑形：分别放大/削弱起音与尾音。p0=起音, p1=尾音, p2=灵敏度
+            const float attack = (clampf(p[0], 0.f, 1.f) - 0.5f) * 2.f;   // -1..1
+            const float sustain = (clampf(p[1], 0.f, 1.f) - 0.5f) * 2.f;  // -1..1
+            const float sens = 0.3f + clampf(p[2], 0.f, 1.f) * 0.7f;
+            const float fast = 1.f - std::exp(-1.f / (0.001f * sr));
+            const float slow = 1.f - std::exp(-1.f / (0.05f * sr));
+
+            for (int i = 0; i < n; i++) {
+                const float pk = std::max(std::fabs(l[i]), std::fabs(r[i]));
+                transientFast += fast * (pk - transientFast);
+                transientSlow += slow * (pk - transientSlow);
+                // 快包络明显高于慢包络 = 正在起音
+                const float diff = transientFast - transientSlow;
+                const float isAttack = diff > 0.02f ? clampf(diff * 8.f * sens, 0.f, 1.f) : 0.f;
+                const float isSustain = 1.f - isAttack;
+                const float gain = 1.f + attack * isAttack + sustain * isSustain;
+                l[i] = l[i] * dry + l[i] * gain * wet;
+                r[i] = r[i] * dry + r[i] * gain * wet;
+            }
+            break;
+        }
+
+        case EffectType::Exciter: {
+            // 激励器：把 3kHz 以上的谐波失真出来再叠回去，让闷的素材变亮。
+            // p0=驱动, p1=频率, p2=混合量
+            const float drive = 1.f + clampf(p[0], 0.f, 1.f) * 7.f;
+            const float freq = 3000.f + clampf(p[1], 0.f, 1.f) * 4000.f;
+            const float amount = clampf(p[2], 0.f, 1.f);
+
+            Biquad hpL, hpR;
+            hpL.highPass(sr, freq, 0.707f);
+            hpR.highPass(sr, freq, 0.707f);
+
+            for (int i = 0; i < n; i++) {
+                const float hiL = hpL.process(l[i]);
+                const float hiR = hpR.process(r[i]);
+                // 过驱动后取残差作为"新生的高频"
+                const float exL = std::tanh(hiL * drive) - hiL;
+                const float exR = std::tanh(hiR * drive) - hiR;
+                l[i] = l[i] * dry + (l[i] + exL * amount) * wet;
+                r[i] = r[i] * dry + (r[i] + exR * amount) * wet;
+            }
+            break;
+        }
+
         default:
             break;
     }

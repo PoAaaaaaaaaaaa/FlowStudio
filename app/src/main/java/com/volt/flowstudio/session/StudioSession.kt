@@ -821,7 +821,15 @@ class StudioSession(private val context: Context) {
     fun exportWav(startTick: Int, endTick: Int, sampleRate: Int = 44100,
                   cb: (File?) -> Unit) {
         val start = startTick
-        val end = if (endTick > startTick) endTick else project.lengthTicks()
+        // 导出范围的右边界要对齐到整小节。
+        //
+        // 原来直接用 endTick（默认 project.lengthTicks()，也就是所有片段
+        // end 的最大值）。音频片段长度一旦不是整小节（差十几 tick），
+        // 导出就会在最后多切进十几 tick —— 把下一段开头也渲进来，
+        // 听感是结尾突然冒出别的声音，这就是"音效混乱"的一处来源。
+        // 往整小节上取整，多出的一点只会是静音或尾音，不会切进新内容。
+        val rawEnd = if (endTick > startTick) endTick else project.lengthTicks()
+        val end = ((rawEnd + Note.BAR - 1) / Note.BAR) * Note.BAR
         // 导出要独占引擎，先停播放，否则会跟实时音频抢状态
         val wasPlaying = isPlaying()
         stopPlayback()
@@ -957,16 +965,53 @@ class StudioSession(private val context: Context) {
 
         val buf = ByteArray(dataBytes)
         var bi = 0
+        // 峰值统计：写盘前先看清楚有没有超
+        var peak = 0f
+        var over = 0
         for (v in interleaved) {
-            // 用 tanh 型的软拐点做最后一道保护，避免硬削的刺耳感
-            val clamped = v.coerceIn(-1f, 1f)
-            val s = (clamped * 32767f).toInt()
+            val av = kotlin.math.abs(v)
+            if (av > peak) peak = av
+            if (av > 1f) over++
+        }
+        android.util.Log.i("FlowStudio",
+            "导出 WAV: ${frames} 帧 @ ${sampleRate}Hz  峰值=$peak  超顶样本=$over")
+
+        for (v in interleaved) {
+            // 软限幅，不是硬削。
+            //
+            // 这里原来写的是 coerceIn(-1f, 1f) —— 硬削波：
+            // 超过 1.0 的部分被拍成一条直线，听感是爆音与刺耳的"炸"，
+            // 而且能量全挤在满刻度上，整体比软削明显更响。
+            // 注释写的是"tanh 型软拐点"，代码却是硬切，两者根本不一致。
+            //
+            // 现在真的按注释做：|v| ≤ 0.85 线性通过（动态完全保留），
+            // 以上走指数曲线平滑压向 1.0，既不硬削也不溢出 16-bit。
+            val s = softLimitToPcm16(v)
             buf[bi++] = (s and 0xFF).toByte()
             buf[bi++] = ((s ushr 8) and 0xFF).toByte()
         }
         out.write(buf)
 
         file.writeBytes(out.toByteArray())
+    }
+
+    /**
+     * 软限幅到 16-bit PCM 整数。
+     *
+     * 拐点 0.85：以下线性通过 —— 绝大多数信号都在这区间，动态完全保留。
+     * 以上用 1-e^-x 曲线平滑压向 1.0，在拐点处斜率为 1，和线性段平滑接上，
+     * 听不出折点。这比硬削温和得多，也比硬削安静（不会把能量全挤在满刻度）。
+     */
+    private fun softLimitToPcm16(v: Float): Int {
+        val knee = 0.85f
+        val a = kotlin.math.abs(v)
+        val shaped = if (a <= knee) a else {
+            val range = 1f - knee
+            val over = a - knee
+            knee + range * (1f - kotlin.math.exp(-over / range * 2.2f))
+        }
+        val signed = if (v < 0f) -shaped else shaped
+        return (signed.coerceIn(-1f, 1f) * 32767f).toInt()
     }
 }
 

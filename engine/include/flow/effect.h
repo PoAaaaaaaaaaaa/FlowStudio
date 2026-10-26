@@ -13,7 +13,14 @@ enum class EffectType : int32_t {
     AutoPan = 11,    // 自动声像（与 Tremolo 反相的立体声版本）
     Saturator = 12,  // 磁带式软饱和（tanh + 轻微的非对称，加二次谐波）
     Gate = 13,       // 噪声门 / 断续门（侧链包络 + 阈值释放）
-    Width = 14       // 立体声宽度（M/S 处理，可到超宽）
+    Width = 14,      // 立体声宽度（M/S 处理，可到超宽）
+    // ---- 1.38 追加。ordinal 必须与 Kotlin 侧 EffectType 严格一致 ----
+    // 只加在末尾：中间插入会让旧工程存档里的效果类型整体错位。
+    Compressor2 = 15, // 多段压缩（低/中/高三段独立阈值与比率）
+    Limiter = 16,     // 砖墙限幅（前视峰值检测 + 瞬时起音）
+    DeEsser = 17,     // 齿音消除（6~9kHz 窄带动态衰减）
+    Transient = 18,   // 瞬态塑形（分别强化/削弱起音与尾音）
+    Exciter = 19      // 激励器（高频谐波再生，让闷的素材变亮）
 };
 
 struct EffectState {
@@ -56,6 +63,13 @@ struct EffectState {
     // Width 的伪侧信号延迟线（Haas 式加宽，给单声道素材造宽度）
     std::vector<float> widthBufL, widthBufR;
     int widthPos = 0;
+
+    // ---- 1.38 新增效果的运行时状态 ----
+    float compBandEnv[3] = {1.f, 1.f, 1.f};  // Compressor2 三段包络
+    float limiter2Env = 1.f;                 // Limiter 增益
+    float deEssEnv = 1.f;                    // DeEsser 衰减包络
+    float transientFast = 0.f;               // Transient 快包络
+    float transientSlow = 0.f;               // Transient 慢包络
 
     // ---- 混响：Freeverb 结构 ----
     static constexpr int kCombCount = 8;

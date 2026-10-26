@@ -3,15 +3,6 @@ package com.volt.flowstudio.session
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Matrix
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffColorFilter
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import java.io.File
 
 /**
@@ -101,145 +92,46 @@ class AppSettings(context: Context) {
         private const val TARGET_H = 2560
 
         /**
-         * 把用户选的图处理成"贴合本软件"的背景。
+         * 导入背景图。
          *
-         * 为什么必须处理：用户在相册里随手选一张，可能过曝、可能饱和到辣眼、
-         * 可能是纯白底 —— 直接铺上去会把整个暗色界面的对比度毁掉。
-         * DAW 的背景必须退到最后面：看不清内容比没有背景更糟。
+         * 1.38 重构：**不再预烘焙**。
          *
-         * 处理顺序（每一步都有理由）：
-         *   1. 按中心裁切到目标比例（避免拉伸变形）
-         *   2. 缩放到目标尺寸（省内存）
-         *   3. 去饱和到只剩 18%：让彩色照片变成灰调，不与轨道色竞争
-         *   4. 压暗曲线：整体亮度压到 16%，并把对比度收窄（暗部不死黑）
-         *   5. 顶部与底部各叠一层渐变压暗：保证 chrome 区域文字可读
-         *   6. 叠一层主题色的极淡染色（8%）：让背景与软件配色同源
-         */
-        fun processBackground(src: Bitmap): Bitmap? {
-            if (src.width < 8 || src.height < 8) return null
-
-            val targetRatio = TARGET_W.toFloat() / TARGET_H.toFloat()
-            val srcRatio = src.width.toFloat() / src.height.toFloat()
-
-            // 1) 中心裁切
-            val cropW: Int
-            val cropH: Int
-            if (srcRatio > targetRatio) {
-                cropH = src.height
-                cropW = (src.height * targetRatio).toInt().coerceAtMost(src.width)
-            } else {
-                cropW = src.width
-                cropH = (src.width / targetRatio).toInt().coerceAtMost(src.height)
-            }
-            val cropX = (src.width - cropW) / 2
-            val cropY = (src.height - cropH) / 2
-
-            // 2) 缩放
-            val out = Bitmap.createBitmap(TARGET_W, TARGET_H, Bitmap.Config.ARGB_8888)
-            val c = Canvas(out)
-
-            // 3+4) 用 ColorMatrix 一次完成去饱和 + 压暗 + 收窄对比
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            val cm = android.graphics.ColorMatrix()
-            // 亮度权重（人眼感知）：R .213 G .715 B .072
-            val sat = 0.60f
-            val inv = 1f - sat
-            val r = 0.213f * inv
-            val g = 0.715f * inv
-            val b = 0.072f * inv
-            cm.set(floatArrayOf(
-                r + sat, g, b, 0f, 0f,
-                r, g + sat, b, 0f, 0f,
-                r, g, b + sat, 0f, 0f,
-                0f, 0f, 0f, 1f, 0f,
-            ))
-            // 这里**几乎不压暗**。
-            //
-            // 走过的弯路：一开始用 contrast 0.72 + offset 26，再叠上下渐变、
-            // 背景层二次压暗、内容区 72% 不透明底 —— 中间乘下来只剩 9% 亮度，
-            // 用户看到的就是一片黑，所以"设置成功但没效果"。
-            //
-            // 正确的职责划分：
-            //   背景图 = 保持接近原图的亮度（用户选它就是因为它好看）
-            //   压暗   = 由内容区自己的半透明底去做，只压内容区
-            // 这样内容区外（顶栏、走带条、页面边缘）能看到接近原图的画面，
-            // 内容区里也能透出纹理。
-            val contrast = 1.0f
-            val offset = 0f
-            val dark = android.graphics.ColorMatrix(floatArrayOf(
-                contrast, 0f, 0f, 0f, offset,
-                0f, contrast, 0f, 0f, offset,
-                0f, 0f, contrast, 0f, offset,
-                0f, 0f, 0f, 1f, 0f,
-            ))
-            cm.postConcat(dark)
-            paint.colorFilter = android.graphics.ColorMatrixColorFilter(cm)
-
-            val srcRect = android.graphics.Rect(cropX, cropY, cropX + cropW, cropY + cropH)
-            val dstRect = android.graphics.Rect(0, 0, TARGET_W, TARGET_H)
-            c.drawBitmap(src, srcRect, dstRect, paint)
-
-            // 5) 上下的额外压暗：chrome 区域（导航栏、走带条）需要压一点才看得清字，
-            //    但 71% 会把那片压成纯黑，用户以为图没生效。40% 足够。
-            val topGrad = LinearGradient(
-                0f, 0f, 0f, TARGET_H * 0.18f,
-                intArrayOf(0x3D000000, 0x00000000),
-                null, Shader.TileMode.CLAMP
-            )
-            paint.reset()
-            paint.isAntiAlias = true
-            paint.shader = topGrad
-            c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H * 0.18f, paint)
-
-            val botGrad = LinearGradient(
-                0f, TARGET_H * 0.76f, 0f, TARGET_H.toFloat(),
-                intArrayOf(0x00000000, 0x55000000),
-                null, Shader.TileMode.CLAMP
-            )
-            paint.shader = botGrad
-            c.drawRect(0f, TARGET_H * 0.76f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
-
-            // 6) 主题色染色：极淡，只为了让背景与软件同源
-            paint.shader = null
-            paint.colorFilter = PorterDuffColorFilter(
-                com.volt.flowstudio.ui.Palette.withAlpha(com.volt.flowstudio.ui.Palette.ACCENT, 15),
-                PorterDuff.Mode.SRC_OVER
-            )
-            c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
-
-            // 7) 右上角加一处极淡的光斑，避免整张图死平
-            paint.colorFilter = null
-            val glow = RadialGradient(
-                TARGET_W * 0.78f, TARGET_H * 0.16f, TARGET_W * 0.62f,
-                intArrayOf(0x1EFFFFFF, 0x00FFFFFF),
-                null, Shader.TileMode.CLAMP
-            )
-            paint.shader = glow
-            c.drawRect(0f, 0f, TARGET_W.toFloat(), TARGET_H.toFloat(), paint)
-
-            return out
-        }
-
-        /**
-         * 处理并落盘，返回最终路径。失败返回 null。
+         * 旧做法是选图时就把图裁成 1440×2560、去饱和、叠渐变、加光斑，
+         * 全部压成一张位图存盘。这带来三个没法修的问题：
          *
-         * 存 filesDir 而不是 cacheDir —— 这是"背景没作用"的最后一个真凶：
-         * cacheDir 是缓存目录，系统存储紧张时随时清空，debug 包覆盖安装也可能清。
-         * 文件一没，hasBackground() 返回 false，壁纸静默回到渐变；
-         * 而 prefs 里的路径还留着，设置界面仍显示"已设置"——
-         * 用户看到的就是"选了图提示成功，界面却什么都没有"。
+         *   1. **比例是写死的**。竖屏 9:16 的裁切到了横屏平板上被 cover 拉伸，
+         *      人物会变形或者被切掉半个头。屏幕比例是运行时的属性，
+         *      不该在落盘时就被焊死。
+         *   2. **参数改不了**。压暗、去饱和、渐变都烘焙进了像素，
+         *      用户想"背景再亮一点"只能重新选一次图。设置里的
+         *      "背景压暗"开关只能再叠一层，越叠越黑。
+         *   3. **每次换屏幕都重新缩放**。换设备、旋转、分屏，
+         *      都要把那张 1440×2560 再缩一遍，锯齿就是这样出来的。
          *
-         * 文件名带序列号（background-1.jpg、background-2.jpg…）：
-         * 固定文件名会让"更换"变成路径不变、内容变了，加载判据认不出来。
-         * 带序列号之后路径本身就是变化的，任何基于路径比对的逻辑都成立。
-         * 旧文件在写完新图之后删掉，磁盘上始终只有一张。
+         * 现在只做两件事：按设备能承受的上限缩小尺寸（省内存），
+         * 存成 JPEG。裁切、去饱和、压暗、渐变、光斑全部交给
+         * WallpaperView 在 onDraw 里按**当前实际尺寸**算 ——
+         * 那里才知道屏幕到底多宽多高。
          */
         fun importBackground(src: Bitmap, filesDir: File): String? {
-            val processed = processBackground(src) ?: return null
+            if (src.width < 8 || src.height < 8) return null
+
+            // 只按"内存上限"缩小，不改比例、不裁切。
+            // 长边压到 2048 是为了单张位图不超过约 12MB（2048×1152×4）。
+            val maxSide = 2048
+            val longSide = maxOf(src.width, src.height)
+            val scaled = if (longSide > maxSide) {
+                val k = maxSide.toFloat() / longSide
+                val w = (src.width * k).toInt().coerceAtLeast(8)
+                val h = (src.height * k).toInt().coerceAtLeast(8)
+                runCatching { Bitmap.createScaledBitmap(src, w, h, true) }.getOrDefault(src)
+            } else src
+
             val dir = File(filesDir, "theme")
             if (!dir.isDirectory && !dir.mkdirs()) return null
 
-            // 序列号：取现有 background-*.jpg 里最大的编号 +1
+            // 序列号：取现有 background-*.jpg 里最大的编号 +1。
+            // 路径本身要变化，否则"换图"在加载判据眼里就是"同一张"。
             val seq = (dir.listFiles { f ->
                 f.isFile && f.name.startsWith("background-") && f.name.endsWith(".jpg")
             }?.mapNotNull { f ->
@@ -249,7 +141,9 @@ class AppSettings(context: Context) {
 
             val ok = runCatching {
                 f.outputStream().use { os ->
-                    processed.compress(Bitmap.CompressFormat.JPEG, 90, os)
+                    // 质量 92：原图要留足够信息让运行时去饱和/压暗，
+                    // 压太狠会先丢掉暗部细节，之后无论怎么调都回不来。
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 92, os)
                 }
             }.isSuccess
             if (!ok) {
@@ -257,7 +151,7 @@ class AppSettings(context: Context) {
                 return null
             }
             android.util.Log.i("FlowStudio", "背景已写入 ${f.absolutePath} " +
-                "${f.length() / 1024}KB")
+                "${f.length() / 1024}KB · 源 ${src.width}x${src.height} → 存 ${scaled.width}x${scaled.height}")
             return f.absolutePath
         }
 
