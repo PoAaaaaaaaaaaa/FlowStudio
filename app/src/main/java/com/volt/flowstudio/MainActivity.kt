@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     private val REQ_PICK_AUDIO = 4101
     private val REQ_MEDIA_PERM = 4102
     private val REQ_PICK_BACKGROUND = 4103
+    private val REQ_PICK_PLAYHEAD = 4104
     private var columnLayout: android.widget.LinearLayout? = null
     private var navBar: android.widget.LinearLayout? = null
     private var navMenuButton: FlowButton? = null
@@ -65,6 +66,8 @@ class MainActivity : Activity() {
     /** 应用设置（背景图、摆件、常亮等）。与工程无关，独立持久化。 */
     private lateinit var settings: com.volt.flowstudio.session.AppSettings
     private var backgroundView: com.volt.flowstudio.ui.WallpaperView? = null
+    /** 播放头贴片（玩偶骑剑）。从 filesDir 加载，设置里可选/重选 */
+    private var playheadSprite: com.volt.flowstudio.ui.PlayheadSprite? = null
     /** 底部音乐数值表：位置 / BPM / 调 / 和声 / 规模 / 发声数 */
     private var readout: com.volt.flowstudio.ui.MusicReadout? = null
     /** 每个小节推导出的和弦，换工程或改音符时重算 */
@@ -106,7 +109,8 @@ class MainActivity : Activity() {
         // 现在任何一步失败都降级成"能打开 + 顶部一条红条说明原因"，
         // 而不是让整个应用起不来。DAO 里一个空指针不该让用户丢掉他的工程。
         val stage = runCatching {
-            buildUi()
+            playheadSprite = com.volt.flowstudio.ui.PlayheadSprite.load(this)
+        buildUi()
             bindSession()
             showTab(0)
             showBootDiagnostics()
@@ -469,6 +473,7 @@ class MainActivity : Activity() {
         // 所有内容 View 到这里才齐。背景图放在这里应用 ——
         // 早于这里调用会撞 lateinit（1.31 的启动闪退就是这么发生的）。
         applyBackground()
+        playlist.playheadSprite = playheadSprite
 
         // 系统栏：只把整列往内推，不参与高度分配，避免和布局互相打架。
         root.setOnApplyWindowInsetsListener { _, insets ->
@@ -987,6 +992,7 @@ class MainActivity : Activity() {
                 o.beatPulse = (o.beatPulse - 0.08f).coerceAtLeast(0f)
             }
         }
+        playlist.playheadGlow = if (session.isPlaying()) 1f else 0f
         // 走带条：位置不依赖引擎（引擎坏了也该看到"停在哪"）
         transportBar.positionTicks = pos0
         transportBar.barTicks = session.project.barTicks
@@ -1136,6 +1142,14 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
 
         // 背景图：单独一条路径，与音频导入完全分开
+        if (requestCode == REQ_PICK_PLAYHEAD) {
+            if (resultCode == RESULT_OK) {
+                val uri = data?.data ?: data?.clipData?.getItemAt(0)?.uri
+                if (uri != null) handlePlayheadResult(uri)
+            }
+            return
+        }
+
         if (requestCode == REQ_PICK_BACKGROUND) {
             if (resultCode == RESULT_OK) {
                 val uri = data?.data ?: data?.clipData?.getItemAt(0)?.uri
@@ -1294,6 +1308,7 @@ class MainActivity : Activity() {
                 settings,
                 applier = settingsApplier,
                 onPickBackground = { pickBackgroundImage() },
+                onPickPlayhead = { pickPlayheadImage() },
                 onShowDiagnostics = { showDiagnostics() },
                 onShowGuide = { showGestureGuide() },
                 onShowDj = { showDjKnowledge() },
@@ -1355,6 +1370,35 @@ class MainActivity : Activity() {
         override fun actualKeepAwake(): Boolean = settings.keepAwake
     }
 
+    /** 播放头贴图：同一套 SAF 选择器，走独立的请求码与处理。 */
+    private fun pickPlayheadImage() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+            type = "image/*"
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+        }
+        runCatching { startActivityForResult(intent, REQ_PICK_PLAYHEAD) }
+            .onFailure { toast("这台设备没有可用的图片选择器") }
+    }
+
+    private fun handlePlayheadResult(uri: android.net.Uri) {
+        toast("正在处理播放头贴图…")
+        Thread {
+            val r = com.volt.flowstudio.ui.PlayheadSprite.importFromUri(this, uri)
+            ui.post(Runnable {
+                if (r.error != null) {
+                    toast("贴图处理失败：${r.error}")
+                    return@Runnable
+                }
+                playheadSprite = com.volt.flowstudio.ui.PlayheadSprite.load(this)
+                playlist.playheadSprite = playheadSprite
+                playlist.invalidate()
+                settingsWindow?.dismiss()
+                settingsWindow = null
+                toast("播放头已更换 · ${r.width}x${r.height}")
+            })
+        }.start()
+    }
+
     /** 系统图片选择器：只取图片，不限定来源（相册、文件管理器都行）。 */
     private fun pickBackgroundImage() {
         val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
@@ -1374,23 +1418,37 @@ class MainActivity : Activity() {
     private fun handleBackgroundResult(uri: android.net.Uri) {
         toast("正在处理背景图…")
         Thread {
-            val path = runCatching {
+            val result = runCatching {
                 val src = contentResolver.openInputStream(uri)?.use { input ->
                     android.graphics.BitmapFactory.decodeStream(input)
-                } ?: return@runCatching null
-                com.volt.flowstudio.session.AppSettings.importBackground(src, cacheDir)
-            }.getOrNull()
+                }
+                if (src == null) {
+                    android.util.Log.w("FlowStudio", "背景源图解码为空: $uri")
+                    null
+                } else {
+                    val p = com.volt.flowstudio.session.AppSettings.importBackground(src, filesDir)
+                    android.util.Log.i("FlowStudio",
+                        "背景处理: 源 ${src.width}x${src.height} -> ${p ?: "失败"}")
+                    p
+                }
+            }.getOrElse {
+                android.util.Log.e("FlowStudio", "背景处理异常", it)
+                null
+            }
 
             ui.post(Runnable {
-                if (path == null) {
+                if (result == null) {
                     toast("这张图读不出来，换一张试试")
                     return@Runnable
                 }
-                settings.backgroundPath = path
+                settings.backgroundPath = result
                 applyBackground()
+                // 给出可见的确认：toast 之外，把壁纸层强制重绘一轮
+                backgroundView?.invalidate()
+                rootLayout?.invalidate()
                 settingsWindow?.dismiss()
                 settingsWindow = null
-                toast("背景已应用")
+                toast("背景已应用 · ${result.substringAfterLast('/')}")
             })
         }.start()
     }

@@ -145,6 +145,12 @@ class PlaylistView @JvmOverloads constructor(
     /** 单击片段后先记下，双击判定结束时才决定要不要打开。 */
     private var pendingOpenClip: com.volt.flowstudio.model.Clip? = null
 
+    /** 播放头贴片（玩偶骑剑）。null 时回退到经典红线+三角。 */
+    var playheadSprite: com.volt.flowstudio.ui.PlayheadSprite? = null
+    /** 播放中贴片的辉光脉冲 0..1，由外部 ticker 喂 */
+    var playheadGlow = 0f
+        set(value) { field = value }
+
     private val scanCache = HashMap<EnvelopeKey, FloatArray>()
     private var scanCacheBarWidth = -1f
 
@@ -505,10 +511,18 @@ class PlaylistView @JvmOverloads constructor(
     private fun drawPlayhead(canvas: Canvas, w: Float, h: Float) {
         val px = tickToX(playheadTick)
         if (px < headerWidth || px > w) return
+
+        // 用户设了玩偶贴片：玩偶骑剑当播放头，剑身细线指示精确时间点
+        val sp = playheadSprite
+        if (sp?.bitmap != null) {
+            sp.draw(canvas, px, rulerHeight.toFloat(), h.toFloat(), playheadGlow, ::dp)
+            return
+        }
+
+        // 默认：红线 + 顶部小三角
         line(canvas, px, 0f, px, h, Palette.RED, dp(1.4f))
         b.fill.color = Palette.RED
         b.fill.style = Paint.Style.FILL
-        // 顶部一个小三角，比圆点更清楚指着位置。
         val p = android.graphics.Path()
         p.moveTo(px - dp(4f), 0f)
         p.lineTo(px + dp(4f), 0f)

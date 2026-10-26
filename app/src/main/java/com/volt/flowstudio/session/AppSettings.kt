@@ -47,13 +47,25 @@ class AppSettings(context: Context) {
     fun save() { /* 字段 setter 已各自落盘，这里保留给未来批量写入 */ }
 
     /** 背景图处理完的信号：让界面重绘。 */
-    fun hasBackground(): Boolean = backgroundPath?.let { File(it).isFile } == true
+    fun hasBackground(): Boolean {
+        val p = backgroundPath
+        val exists = p?.let { File(it).isFile } == true
+        // 路径在但文件没了（cacheDir 被清/换设备）——日志说明白，不要静默
+        if (p != null && !exists) {
+            android.util.Log.w("FlowStudio", "背景文件丢失: $p（缓存被清或换机）")
+        }
+        return exists
+    }
 
     fun loadBackground(): Bitmap? {
         val p = backgroundPath ?: return null
         val f = File(p)
         if (!f.isFile) return null
-        return runCatching { BitmapFactory.decodeFile(p) }.getOrNull()
+        val bmp = runCatching { BitmapFactory.decodeFile(p) }.getOrNull()
+        if (bmp == null) {
+            android.util.Log.w("FlowStudio", "背景解码失败: $p")
+        }
+        return bmp
     }
 
     fun clearBackground() {
@@ -87,7 +99,7 @@ class AppSettings(context: Context) {
          *   5. 顶部与底部各叠一层渐变压暗：保证 chrome 区域文字可读
          *   6. 叠一层主题色的极淡染色（8%）：让背景与软件配色同源
          */
-        fun processBackground(src: Bitmap, cacheDir: File): Bitmap? {
+        fun processBackground(src: Bitmap): Bitmap? {
             if (src.width < 8 || src.height < 8) return null
 
             val targetRatio = TARGET_W.toFloat() / TARGET_H.toFloat()
@@ -192,21 +204,29 @@ class AppSettings(context: Context) {
             return out
         }
 
-        /** 处理并落盘，返回最终路径。失败返回 null。 */
-        fun importBackground(src: Bitmap, cacheDir: File): String? {
-            val processed = processBackground(src, cacheDir) ?: return null
-            val dir = File(cacheDir, "theme")
+        /**
+         * 处理并落盘，返回最终路径。失败返回 null。
+         *
+         * 存 filesDir 而不是 cacheDir —— 这是"背景没作用"的最后一个真凶：
+         * cacheDir 是缓存目录，系统存储紧张时随时清空，debug 包覆盖安装也可能清。
+         * 文件一没，hasBackground() 返回 false，壁纸静默回到渐变；
+         * 而 prefs 里的路径还留着，设置界面仍显示"已设置"——
+         * 用户看到的就是"选了图提示成功，界面却什么都没有"。
+         */
+        fun importBackground(src: Bitmap, filesDir: File): String? {
+            val processed = processBackground(src) ?: return null
+            val dir = File(filesDir, "theme")
             if (!dir.isDirectory && !dir.mkdirs()) return null
-            // 用时间戳命名而不是固定名：避免 BitmapFactory 命中旧的 inBitmap 缓存
-            val f = File(dir, "bg_${System.currentTimeMillis()}.jpg")
+            // 固定文件名：设置里"更换"语义就是替换，不需要历史版本
+            val f = File(dir, "background.jpg")
             val ok = runCatching {
                 f.outputStream().use { os ->
-                    processed.compress(Bitmap.CompressFormat.JPEG, 88, os)
+                    processed.compress(Bitmap.CompressFormat.JPEG, 90, os)
                 }
             }.isSuccess
             if (!ok) return null
-            // 清掉旧图，只留最新一张
-            dir.listFiles()?.forEach { old -> if (old != f) runCatching { old.delete() } }
+            android.util.Log.i("FlowStudio", "背景已写入 ${f.absolutePath} " +
+                "${f.length() / 1024}KB")
             return f.absolutePath
         }
     }

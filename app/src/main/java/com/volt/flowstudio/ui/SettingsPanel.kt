@@ -771,6 +771,7 @@ class SettingsWindow(
     private val settings: com.volt.flowstudio.session.AppSettings,
     private val applier: SettingsApplier,
     private val onPickBackground: () -> Unit,
+    private val onPickPlayhead: () -> Unit,
     private val onShowDiagnostics: () -> Unit,
     private val onShowGuide: () -> Unit,
     private val onShowDj: () -> Unit,
@@ -794,6 +795,13 @@ class SettingsWindow(
 
         val groups = listOf(
             "外观" to listOf(
+                SettingRow(
+                    title = "播放头贴图",
+                    subtitle = "选一张玩偶图（浅色底自动抠透明），骑在剑上指示播放位置",
+                    kind = SettingKind.VALUE,
+                    valueText = if (com.volt.flowstudio.ui.PlayheadSprite.hasStored(context)) "更换" else "选择",
+                    onClick = onPickPlayhead,
+                ),
                 SettingRow(
                     title = "自定义背景图",
                     subtitle = if (settings.backgroundPath != null) "已设置 · 轻点更换或清除" else "选一张图，自动套用本软件的暗色调",
