@@ -66,8 +66,8 @@ class MusicReadout @JvmOverloads constructor(
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        // 底：比走带条再深一档，形成"走带条 + 读数条"的双层结构
-        rect(canvas, 0f, 0f, w, h, 0xFF0A0C10.toInt())
+        // 底：半透明帽，与走带条同一层压暗（1.33）
+        rect(canvas, 0f, 0f, w, h, 0xD10A0C10.toInt())
         // 顶部一条极细分隔，把两条分开但不抢眼
         line(canvas, 0f, 0f, w, 0f, Palette.withAlpha(Palette.LINE, 70), dp(0.6f))
 

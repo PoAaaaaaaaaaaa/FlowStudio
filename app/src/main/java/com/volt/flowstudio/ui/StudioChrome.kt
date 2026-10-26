@@ -1,9 +1,13 @@
 package com.volt.flowstudio.ui
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -15,21 +19,34 @@ import android.view.MotionEvent
 import android.widget.TextView
 import kotlin.math.abs
 
-/** 所有页面共用的低对比背景，避免大块纯黑造成视觉断层。 */
-class StudioBackground @JvmOverloads constructor(
+/**
+ * 自定义背景层（1.33 重构）。
+ *
+ * 旧实现的问题链：把图画在最底层 View 上，指望上层内容自己半透明让位。
+ * 但 chrome（页签/工具栏/走带条/读数条）全是实色，内容区又叠着多层半透明底，
+ * 真机上看背景几乎为 0；调了几轮 alpha 都是隔靴搔痒。
+ *
+ * 新架构（WallpaperView + 内容帽）：
+ *
+ *   root(透明)
+ *   ├── WallpaperView      ← 背景图唯一绘制处，铺满整屏，不参与任何内容布局
+ *   └── column
+ *       ├── TabBar         ← 画"帽"：半透明底，让壁纸从页签缝隙透出来
+ *       ├── content(页面)   ← 各页面自己决定给不给底（见 CanvasBackdrop）
+ *       ├── TransportBar   ← 同上
+ *       └── MusicReadout   ← 同上
+ *
+ * 关键变化：chrome 不再画实色，而是画一层"半透明帽"。
+ * 这样壁纸在全屏范围内连续可见，chrome 区域也能看到它，
+ * 同时帽的压暗保证文字可读。壁纸与内容彻底解耦：
+ * 壁纸只管画图，内容只管自己的半透明底，两边不再互相猜。
+ */
+class WallpaperView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
-) : BaseView(context, attrs) {
-    private var shader: LinearGradient? = null
+) : android.view.View(context, attrs) {
 
-    /**
-     * 用户自定义背景图（已经过 AppSettings 处理：去饱和、压暗、带渐变压边）。
-     *
-     * 它只画在这一层 —— 这一层是内容区所有 View 的最底层，
-     * 上层的轨道、片段、推子各自有实心底色，所以换背景绝不会影响
-     * 音频轨道与波形区域的可读性。这是"背景不改变轨道 UI"的实现方式。
-     */
-    var backgroundImage: android.graphics.Bitmap? = null
+    var backgroundImage: Bitmap? = null
         set(value) {
             if (field === value) return
             field = value
@@ -37,96 +54,56 @@ class StudioBackground @JvmOverloads constructor(
             invalidate()
         }
 
-    /**
-     * 当前已加载图对应的源路径。
-     *
-     * 用于"换图检测"：仅凭 backgroundImage != null 无法区分
-     * "这张就是设置的那张"和"这是上一张"——后者曾导致换图永远不生效。
-     */
+    /** 当前已加载图对应的源路径（换图检测用）。 */
     var loadedPath: String? = null
 
-    /** 背景图额外压暗（用户可在设置里关掉）。 */
+    /** 是否额外压暗（设置里的"背景压暗"）。 */
     var dim = true
         set(value) { if (field != value) { field = value; invalidate() } }
 
-    private val imgMatrix = android.graphics.Matrix()
-    private val imgPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or
-        android.graphics.Paint.FILTER_BITMAP_FLAG)
-    private val dimPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    private val imgMatrix = Matrix()
+    private val imgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val dimPaint = Paint()
+    private val gradPaint = Paint()
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        // 从左上到右下的极缓渐变：让大面积暗色有个光源方向，
-        // 不至于像一块死板的纯色板。幅度只有 3-4 个色阶，几乎察觉不到。
-        shader = LinearGradient(
-            0f, 0f, w.toFloat(), h.toFloat(),
-            intArrayOf(0xFF12151A.toInt(), Palette.BG, 0xFF0A0C0F.toInt()),
-            floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP
-        )
         rebuildMatrix()
     }
 
-    /**
-     * 背景图铺满策略：等比例放大到覆盖整块画布（cover），居中。
-     * 不做拉伸 —— 拉伸会让照片里的人脸变形，观感立刻廉价。
-     */
+    /** cover 策略：等比放大到覆盖画布，居中裁切，不拉伸变形。 */
     private fun rebuildMatrix() {
         val bmp = backgroundImage ?: return
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-        val sx = w / bmp.width
-        val sy = h / bmp.height
-        val s = maxOf(sx, sy)
-        val dx = (w - bmp.width * s) * 0.5f
-        val dy = (h - bmp.height * s) * 0.5f
+        val s = maxOf(w / bmp.width, h / bmp.height)
         imgMatrix.setScale(s, s)
-        imgMatrix.postTranslate(dx, dy)
+        imgMatrix.postTranslate((w - bmp.width * s) * 0.5f, (h - bmp.height * s) * 0.5f)
     }
 
     override fun onDraw(canvas: Canvas) {
         val bmp = backgroundImage
-        if (bmp != null && !bmp.isRecycled) {
-            if (imgMatrix.isIdentity) {
-                rebuildMatrix()
-                // matrix 仍是 identity 说明 width/height 还没量出来，
-                // 这帧会按原始尺寸画在左上角 —— 记下来便于诊断
-                if (imgMatrix.isIdentity) {
-                    android.util.Log.w("FlowStudio",
-                        "背景绘制时尺寸未就绪 w=$width h=$height")
-                }
-            }
-            canvas.drawBitmap(bmp, imgMatrix, imgPaint)
-            // 二次压暗。
-            //
-            // 图片本身在 AppSettings 里已经压过一轮，这里不该再压一次重的 ——
-            // 原来这里是 0x4A（29%），叠在前一轮之后把背景又暗掉近三成。
-            // 现在只在"背景压暗"开启时给 12%，关闭时几乎不压（5%），
-            // 并把保证可读性的责任交给上方内容区的半透明底。
-            dimPaint.color = if (dim) 0x14000000 else 0x08000000
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
-        } else {
-            b.fill.shader = shader
-            b.fill.style = android.graphics.Paint.Style.FILL
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), b.fill)
-            b.fill.shader = null
+        if (bmp == null || bmp.isRecycled) {
+            // 无自定义背景：默认渐变（保留原来的光源方向）
+            gradPaint.shader = LinearGradient(
+                0f, 0f, width.toFloat(), height.toFloat(),
+                intArrayOf(0xFF12151A.toInt(), 0xFF0D0F13.toInt(), 0xFF0A0C0F.toInt()),
+                floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), gradPaint)
+            gradPaint.shader = null
+            return
         }
 
-        // 极淡的网格：给大面积暗色一点"工作台"的质感，不抢内容。
-        // 有背景图时把网格再淡一半 —— 照片上叠满网格会很脏。
-        val step = dp(32f)
-        if (step <= 0f) return
-        b.stroke.color = Palette.withAlpha(Palette.LINE, if (bmp != null) 7 else 12)
-        b.stroke.strokeWidth = dp(0.5f)
-        var x = 0f
-        while (x < width) {
-            canvas.drawLine(x, 0f, x, height.toFloat(), b.stroke)
-            x += step
-        }
-        var y = 0f
-        while (y < height) {
-            canvas.drawLine(0f, y, width.toFloat(), y, b.stroke)
-            y += step
-        }
+        if (imgMatrix.isIdentity) rebuildMatrix()
+        canvas.drawBitmap(bmp, imgMatrix, imgPaint)
+
+        // 单一压暗层：这是壁纸与内容之间唯一的暗化。
+        // 开 = 30%，关 = 10%。之前"图内压暗 + 层内压暗 + 内容底压暗"三层相乘
+        // 把 50% 的图压到 9%，用户看到的就是全黑 —— 参数怎么调都不对，
+        // 因为错的是结构。现在只有这一层。
+        dimPaint.color = if (dim) 0x4D000000 else 0x1A000000
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
     }
 }
 

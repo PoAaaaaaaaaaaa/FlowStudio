@@ -64,7 +64,7 @@ class MainActivity : Activity() {
     private var ornament: com.volt.flowstudio.ui.OrnamentBar? = null
     /** 应用设置（背景图、摆件、常亮等）。与工程无关，独立持久化。 */
     private lateinit var settings: com.volt.flowstudio.session.AppSettings
-    private var backgroundView: com.volt.flowstudio.ui.StudioBackground? = null
+    private var backgroundView: com.volt.flowstudio.ui.WallpaperView? = null
     /** 底部音乐数值表：位置 / BPM / 调 / 和声 / 规模 / 发声数 */
     private var readout: com.volt.flowstudio.ui.MusicReadout? = null
     /** 每个小节推导出的和弦，换工程或改音符时重算 */
@@ -296,7 +296,7 @@ class MainActivity : Activity() {
         toolBarHeight = dp(if (hDp < 700f) 38 else 42)
 
         val root = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-        val bg = StudioBackground(this)
+        val bg = com.volt.flowstudio.ui.WallpaperView(this)
         backgroundView = bg
         root.addView(bg, matchParams())
         // 背景图的实际应用放到 buildUi 末尾：那时内容 View 都已创建，
@@ -1395,7 +1395,7 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** 把设置里的背景图贴到底层 StudioBackground。没有就回到默认渐变。 */
+    /** 把设置里的背景图贴到 WallpaperView。没有就回到默认渐变。 */
     /**
      * 从工程内容推导每小节的和弦。
      *

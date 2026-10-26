@@ -86,8 +86,9 @@ class TransportBar @JvmOverloads constructor(
         if (bottomMode) {
             // 底栏不再画成"浮起的卡片"：那层高光加描边会跟内容区抢注意力。
             // 现在它只是一块比画布略亮的横条，靠明度分层，不靠线。
-            rect(canvas, 0f, 0f, w, h, Palette.BG)
-            rect(canvas, 0f, dp(3f), w, h, Palette.SURFACE, dp(14f))
+            // 走带条同样画帽：上层一条浅色胶囊负责质感，底衬改半透明
+            rect(canvas, 0f, 0f, w, h, 0xD10D0F13.toInt())
+            rect(canvas, 0f, dp(3f), w, h, 0xD116191F.toInt(), dp(14f))
             if (playing) {
                 // 播放态：一条很短的强调线贴在最上沿，只提示"在走"，不闪。
                 rect(canvas, dp(16f), dp(3f), dp(16f) + dp(44f), dp(4.4f),
@@ -406,7 +407,9 @@ class TabBar @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
         // 页签整体是一枚悬浮胶囊，与内容之间留出空气感。
-        rect(canvas, 0f, 0f, w, h, Palette.BG)
+        // 1.33：实色 → 半透明帽（alpha 0xD1）。壁纸层在 View 树更底下连续存在，
+        // chrome 画实色会把壁纸切成几段，看起来"壁纸只在内容区出现"。
+        rect(canvas, 0f, 0f, w, h, 0xD10D0F13.toInt())
         if (tabs.isEmpty()) return
         val inset = dp(10f)
         val pillTop = dp(6f)
