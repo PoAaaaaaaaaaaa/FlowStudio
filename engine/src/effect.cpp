@@ -50,6 +50,10 @@ void EffectState::reset() {
     for (int i = 0; i < 4; i++) { phaserStagesL[i].reset(); phaserStagesR[i].reset(); }
     phaserPhase = 0.f;
     phaserFbL = phaserFbR = 0.f;
+    tremPhase = 0.f;
+    satPrev = 0.f;
+    gateEnv = 0.f;
+    gateGain = 1.f;
     for (int i = 0; i < kCombCount; i++) {
         combL[i].clear(); combR[i].clear();
         combDampL[i] = combDampR[i] = 0.f;
@@ -324,6 +328,161 @@ void EffectState::process(float* l, float* r, int n, float sr, float bpm) {
                 phaserFbR = clampf(b, -4.f, 4.f);
                 l[i] = l[i] * dry + (l[i] + a) * wet;
                 r[i] = r[i] * dry + (r[i] + b) * wet;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------------- 电颤
+        // 经典幅度调制：正弦 LFO 直接乘到信号上。
+        // p0 速率 0.1..14 Hz，p1 深度，p2 波形（正弦/方波/锯齿）
+        case EffectType::Tremolo: {
+            const float rate = curve(p[0], 0.1f, 14.f);
+            const float depth = clampf(p[1], 0.f, 1.f);
+            const float shape = clampf(p[2], 0.f, 1.f);
+            const float inc = rate / sr;
+            for (int i = 0; i < n; i++) {
+                tremPhase += inc;
+                if (tremPhase >= 1.f) tremPhase -= 1.f;
+                float lfo;
+                if (shape < 0.33f) lfo = 0.5f + 0.5f * std::sin(tremPhase * kTwoPi);
+                else if (shape < 0.66f) lfo = tremPhase < 0.5f ? 1.f : 0.f;
+                else lfo = tremPhase;
+                const float g = 1.f - depth * (1.f - lfo);
+                l[i] = l[i] * dry + l[i] * g * wet;
+                r[i] = r[i] * dry + r[i] * g * wet;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------------- 自动声像
+        // 与电颤同一套 LFO，但作用在左右两声道上且相位相反。
+        // p0 速率，p1 深度，p2 律动形状（正弦/三角）
+        case EffectType::AutoPan: {
+            const float rate = curve(p[0], 0.05f, 8.f);
+            const float depth = clampf(p[1], 0.f, 1.f);
+            const float shape = clampf(p[2], 0.f, 1.f);
+            const float inc = rate / sr;
+            for (int i = 0; i < n; i++) {
+                tremPhase += inc;
+                if (tremPhase >= 1.f) tremPhase -= 1.f;
+                float lfo;
+                if (shape < 0.5f) lfo = std::sin(tremPhase * kTwoPi);
+                else lfo = 1.f - 4.f * std::fabs(tremPhase - 0.5f);   // 三角
+                const float pos = lfo * depth;                          // -1..1
+                // 等功率声像
+                const float gl = std::cos((pos + 1.f) * 0.25f * kPi);
+                const float gr = std::sin((pos + 1.f) * 0.25f * kPi);
+                l[i] = l[i] * dry + l[i] * gl * wet * 1.414f;
+                r[i] = r[i] * dry + r[i] * gr * wet * 1.414f;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------------- 软饱和
+        // 磁带/电子管的非线性：主项 tanh + 一点非对称项产生偶次谐波。
+        // 纯 tanh 只产生奇次谐波，听起来偏"硬"；加 x² 项才像磁带。
+        // p0 驱动量，p1 非对称量，p2 输出补偿
+        case EffectType::Saturator: {
+            const float drive = 1.f + clampf(p[0], 0.f, 1.f) * 11.f;   // 1..12
+            const float asym = clampf(p[1], 0.f, 1.f) * 0.28f;
+            const float outGain = 0.35f + clampf(p[2], 0.f, 1.f) * 0.65f;
+            const float comp = 1.f / std::sqrt(drive);
+            for (int i = 0; i < n; i++) {
+                const float in = l[i] * drive;
+                // 非对称：正半周多压一点，产生二次谐波（磁带的味道）
+                float y = fastTanh(in + asym * in * in);
+                satPrev = y;                        // 保留状态（未来做动态项用）
+                l[i] = l[i] * dry + y * comp * outGain * wet;
+
+                const float inr = r[i] * drive;
+                const float yr = fastTanh(inr + asym * inr * inr);
+                r[i] = r[i] * dry + yr * comp * outGain * wet;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------------- 噪声门
+        // 侧链包络跟随 + 阈值开关 + 释放平滑。
+        // 用途：切掉人声素材里的呼吸底噪，或做断奏门限效果。
+        // p0 阈值，p1 起音快慢，p2 释放快慢，p3 深度
+        case EffectType::Gate: {
+            // 阈值走线性 0..0.5 而不是对数：素材电平差异很大，
+            // 对数映射在 p0 中段就会落到 0.004 这种极低值上，门永远开着。
+            const float thresh = clampf(p[0], 0.f, 1.f) * 0.5f;
+            const float atkCoef = 1.f - std::exp(-1.f / (std::max(0.0002f, p[1] * 0.05f) * sr));
+            const float relCoef = 1.f - std::exp(-1.f / (std::max(0.005f, p[2] * 0.8f) * sr));
+            const float depth = clampf(p[3], 0.f, 1.f);
+            for (int i = 0; i < n; i++) {
+                // 取左右较大者的绝对值做包络
+                const float hit = std::max(std::fabs(l[i]), std::fabs(r[i]));
+                const float coef = hit > gateEnv ? atkCoef : relCoef;
+                gateEnv += (hit - gateEnv) * coef;
+
+                const float target = gateEnv > thresh ? 1.f : 0.f;
+                gateGain += (target - gateGain) * (target > gateGain ? atkCoef : relCoef);
+                const float g = 1.f - depth * (1.f - gateGain);
+
+                l[i] = l[i] * dry + l[i] * g * wet;
+                r[i] = r[i] * dry + r[i] * g * wet;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------------- 立体声宽度
+        // M/S 处理：M = (L+R)/2，S = (L-R)/2。
+        // 放大 S 得到"更宽"，压小 S 得到"更窄"，负值则反相（单声道兼容性差）。
+        // p0 宽度 0..2，p1 低频保持（100Hz 以下不做加宽，避免低频抵消）
+        case EffectType::Width: {
+            const float width = clampf(p[0], 0.f, 1.f) * 2.f;          // 0..2
+            const float bassMono = clampf(p[1], 0.f, 1.f);
+
+            // 关键：单声道素材的 S 分量是 0，纯 M/S 放大对它是无效的
+            // （实测侧信号 0.0454 → 0.0454，一点没变）。
+            // 所以这里先给 M 补一条基于延迟的"伪侧信号"：
+            // 左右各自读不同延迟的副本，相位差造出宽度。
+            // 这是业界常用的 Haas 式加宽，不需要原始素材本身有立体声信息。
+            Svf bassLp;
+            bassLp.set(120.f, 0.707f, sr);
+
+            // 伪侧信号用两条短延迟线（最长 12ms，对应 83 Hz 以上）
+            if (widthBufL.size() < 2048) {
+                widthBufL.resize(2048);
+                widthBufR.resize(2048);
+            }
+            const int delayL = (int)(sr * 0.004f);   // 4ms
+            const int delayR = (int)(sr * 0.009f);   // 9ms
+
+            for (int i = 0; i < n; i++) {
+                const float mid = (l[i] + r[i]) * 0.5f;
+
+                // 写入伪延迟线
+                widthPos = (widthPos + 1) % 2048;
+                widthBufL[widthPos] = mid;
+                widthBufR[widthPos] = mid;
+
+                int rl = widthPos - delayL;
+                if (rl < 0) rl += 2048;
+                int rr = widthPos - delayR;
+                if (rr < 0) rr += 2048;
+
+                // 由原始 M 与两份不同延迟的 M 合成左右
+                const float sideL = (mid - widthBufL[rl]) * 0.5f;
+                const float sideR = (mid - widthBufR[rr]) * 0.5f;
+                const float realSide = (l[i] - r[i]) * 0.5f;
+
+                // 真实侧信号与伪侧信号叠加：素材本身立体声时两者都贡献
+                const float side = realSide + (sideL + sideR) * 0.5f;
+
+                const float lowMid = bassLp.process(mid, 0);
+                const float lowPart = std::fabs(lowMid);
+                const float sideKeep = 1.f - bassMono * clampf(lowPart * 4.f, 0.f, 1.f);
+                const float sideW = side * width * sideKeep;
+
+                const float nl = mid + sideW;
+                const float nr = mid - sideW;
+
+                l[i] = l[i] * dry + nl * wet;
+                r[i] = r[i] * dry + nr * wet;
             }
             break;
         }

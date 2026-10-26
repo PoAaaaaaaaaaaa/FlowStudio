@@ -7,7 +7,13 @@
 namespace flow {
 
 enum class EffectType : int32_t {
-    None = 0, Filter, Delay, Reverb, Chorus, Dist, Comp, Eq, Bitcrush, Phaser
+    None = 0, Filter, Delay, Reverb, Chorus, Dist, Comp, Eq, Bitcrush, Phaser,
+    // ---- 1.29 追加。全部是公开算法的直接实现，不依赖任何库。----
+    Tremolo = 10,    // 幅度调制（经典电颤，正弦 LFO）
+    AutoPan = 11,    // 自动声像（与 Tremolo 反相的立体声版本）
+    Saturator = 12,  // 磁带式软饱和（tanh + 轻微的非对称，加二次谐波）
+    Gate = 13,       // 噪声门 / 断续门（侧链包络 + 阈值释放）
+    Width = 14       // 立体声宽度（M/S 处理，可到超宽）
 };
 
 struct EffectState {
@@ -40,6 +46,16 @@ struct EffectState {
     Svf phaserStagesL[4], phaserStagesR[4];     // Phaser
     float phaserPhase = 0.f;
     float phaserFbL = 0.f, phaserFbR = 0.f;
+
+    // ---- 1.29 新增效果的运行时状态 ----
+    float tremPhase = 0.f;             // Tremolo / AutoPan 共用 LFO 相位
+    float satPrev = 0.f;               // Saturator 的一阶状态（非对称项）
+    float gateEnv = 0.f;               // Gate 的包络跟随器
+    float gateGain = 1.f;              // Gate 的平滑增益
+
+    // Width 的伪侧信号延迟线（Haas 式加宽，给单声道素材造宽度）
+    std::vector<float> widthBufL, widthBufR;
+    int widthPos = 0;
 
     // ---- 混响：Freeverb 结构 ----
     static constexpr int kCombCount = 8;

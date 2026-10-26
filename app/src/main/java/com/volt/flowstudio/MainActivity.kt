@@ -59,6 +59,8 @@ class MainActivity : Activity() {
     private var navTitle: TextView? = null
     private var navSubtitle: TextView? = null
     private var navProgress: TextView? = null
+    /** 导航栏右侧的装饰条：电平 + 卷盘 + 唱针。见 OrnamentBar。 */
+    private var ornament: com.volt.flowstudio.ui.OrnamentBar? = null
     private var navSheet: android.app.Dialog? = null
     private val tabTitles = listOf("编排", "机架", "卷帘", "混音")
     private val tabHints = listOf(
@@ -291,6 +293,15 @@ class MainActivity : Activity() {
         titleBox.addView(navSubtitle)
         bar.addView(titleBox, android.widget.LinearLayout.LayoutParams(
             0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        // 右侧摆件：电平 + 磁带卷盘 + 唱针臂。
+        // 导航栏中段在宽屏上是纯色，这里放一排会呼吸的装置，
+        // 既填了空白又能扫一眼看到有没有声音。不接受触摸，不会误触。
+        val deco = com.volt.flowstudio.ui.OrnamentBar(this)
+        ornament = deco
+        bar.addView(deco, android.widget.LinearLayout.LayoutParams(
+            dp(if (portrait) 96 else 118), android.widget.LinearLayout.LayoutParams.MATCH_PARENT
         ))
 
         // 右侧页码：让人知道自己在整个工作流的哪个位置
@@ -845,6 +856,15 @@ class MainActivity : Activity() {
     private fun refreshPlayhead() {
         if (!session.engine.available) return
         val pos = session.positionTicks()
+
+        // 顶部摆件：电平与播放状态。只在这里喂数据，绘制开销都在 OrnamentBar 内部，
+        // 且它自己判断"要不要继续动画"——静止时不重绘。
+        ornament?.let { o ->
+            val pk = session.engine.masterPeak()
+            o.peakL = pk.getOrElse(0) { 0f }
+            o.peakR = pk.getOrElse(1) { 0f }
+            o.playing = session.isPlaying()
+        }
         transportBar.positionTicks = pos
         transportBar.barTicks = session.project.barTicks
         transportBar.bpm = session.project.bpm

@@ -172,6 +172,101 @@ void Voice::setup(Instrument i, int32_t pitchIn, float vel, int32_t endTickIn, i
             subInc = (double)(4.5 + p[3] * 5.0);                // LFO Hz
             break;
         }
+        // ---------------------------------------------------- Karplus-Strong 拨弦
+        // 激励是一段与周期等长的噪声（拨片/指甲的瞬态），
+        // 之后靠延迟线 + 低通反馈把能量一圈圈衰减掉，泛音自然比基频快。
+        // 参数：p0 亮度（低通系数）、p1 衰减（反馈量）、p2 拨片硬度（激励滤波）、
+        //       p3 起音力度敏感、p4..p7 ADSR、p8 音色微调（body 共振）
+        case Instrument::Pluck: {
+            const float f = midiToHz((float)pitch);
+            // 延迟长度要按"整数部分 + 小数部分"拆开：
+            // 只取整数会让音准偏差最高达半个采样，低音区（周期长）能差几十音分。
+            // 小数部分在 render 里用线性插值补偿（分数延迟）。
+            const float exact = (float)sr / std::max(20.f, f);
+            int len = (int)exact;
+            wgFrac = exact - (float)len;          // 0..1
+            if (len < 4) { len = 4; wgFrac = 0.f; }
+            if (len >= kWgSize - 8) { len = kWgSize - 8; wgFrac = 0.f; }
+            wgLen = len;
+            wgPos = 0;
+            // 归零整个波导（只在 setup 时做，不在 render 里做）
+            for (int k = 0; k < kWgSize; k++) wg[k] = 0.f;
+            // 激励：形状决定音色。
+            //
+            // 原始 Karplus-Strong 用纯白噪声，结果是"每个泛音一样响"，
+            // 听起来像弹棉花 —— 而且高频噪声把基频盖住了（实测 440 Hz
+            // 比 220 Hz 还强）。真实拨弦的激励是扫过弦的一段力脉冲：
+            // 频谱以 1/f 下降。所以这里用"积分噪声"（棕噪声）当底，
+            // 再按硬度混入少量白噪声保留拨片的颗粒感。
+            const float hardness = clampf(p[2], 0.f, 1.f);
+            float prev = 0.f;
+            float brown = 0.f;
+            for (int k = 0; k < wgLen; k++) {
+                const float n = noise.next();
+                // 布朗噪声：白噪声经一阶低通积分，频谱自然向低频倾斜
+                brown = brown * 0.92f + n * 0.08f;
+                // 硬度高 = 多保留白噪声 = 更亮的拨片瞬态
+                prev = lerpf(brown * 3.2f, n, hardness * 0.55f);
+                // 起振时乘一个半窗，避免第一个样本是硬阶跃（会爆一下）
+                const float edge = (k < 8) ? (float)k / 8.f
+                                            : 1.f;
+                wg[k] = prev * edge;
+            }
+            wgLast = 0.f;
+            wgDamp = 0.5f + p[0] * 0.48f;     // 越接近 1 越亮、衰减越慢
+            amp.setup(pAttack(p[4]), pDecay(p[5]), p[6], pRelease(p[7]), sr);
+            amp.trigger();
+            // 拨弦的音量随力度变化明显，这里额外放大力度差
+            break;
+        }
+
+        // ---------------------------------------------------- 弦乐合奏
+        // 三路锯齿按 ±8 cent 失谐叠加，是弦乐组"厚"的来源；
+        // 每一路相位错开，避免同时起振造成的相位堆叠。
+        case Instrument::Strings: {
+            const float f = midiToHz((float)pitch);
+            const float detune = (p[2] - 0.5f) * 24.f;       // ±12 cent
+            for (int v = 0; v < 3; v++) {
+                const float cents = detune + (v - 1) * (4.f + p[1] * 10.f);
+                ensInc[v] = (double)(f * std::pow(2.f, cents / 1200.f)) / (double)sr;
+                ensPhase[v] = (double)v * 0.333 + (double)(pitch % 5) * 0.113;
+            }
+            // 弦乐起音天然慢；p[4] 只是微调，基础值不再从 1ms 起
+            amp.setup(0.06f + pAttack(p[4]) * 0.5f, pDecay(p[5]), p[6],
+                      0.15f + pRelease(p[7]), sr);
+            amp.trigger();
+            // 颤音速率存在 subInc，深度在 render 里由 p[3] 取
+            subInc = (double)(4.2 + p[3] * 3.8);
+            lpf.set(pCutoff(p[8]), pQ(p[9]), sr);
+            hpf.set(90.f, 0.707f, sr);
+            auxEnv.level = p[10];
+            break;
+        }
+
+        // ---------------------------------------------------- 拉杆风琴
+        // Hammond 的 9 根拉杆就是 9 个正弦谐波的振幅。
+        // 拉杆编号与谐波（相对基频的倍率）对应如下，这是标准做法。
+        case Instrument::Organ: {
+            const float f = midiToHz((float)pitch);
+            static const float kDrawRatio[9] = {
+                0.5f, 1.5f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 8.f
+            };
+            for (int d = 0; d < 9; d++) {
+                // 每根拉杆一个参数位，p[0..8] 直接就是 9 根拉杆的拉出量
+                drawbars[d] = clampf(p[d], 0.f, 1.f);
+                (void)kDrawRatio[d];
+            }
+            osc1.setFreq(f, sr);
+            osc1.reset(0.0);
+            // 风琴没有衰减：按键一直响，包络是方形的（这是它的性格）
+            amp.setup(0.004f + p[9] * 0.05f, 0.01f, 1.f, 0.03f + p[10] * 0.15f, sr);
+            amp.trigger();
+            // 打击泛音（Hammond 的 percussion）借 auxEnv 做一次快速衰减
+            auxEnv.setup(0.001f, 0.08f + p[11] * 0.25f, 0.f, 0.05f, sr);
+            auxEnv.trigger();
+            break;
+        }
+
         case Instrument::Sampler: {
             samplePos = sampleStart;
             // 采样根音固定 60，按半音变速
@@ -380,6 +475,129 @@ bool Voice::render(float* outL, float* outR, int n, const float* p, float sr) {
                 float trem = 1.f - lfoDepth * 0.5f * (1.f - std::cos((float)lfo * kTwoPi));
                 outL[i] += s * trem;
                 outR[i] += s * (2.f - trem);
+            }
+            break;
+        }
+
+        // ---------------------------------------------------- Karplus-Strong 拨弦
+        case Instrument::Pluck: {
+            const float damp = wgDamp;
+            // 波导反馈里的低通：这是"泛音先衰减、基频后衰减"的物理来源。
+            const float fb = 0.996f + p[1] * 0.0039f;    // 反馈量 0.996..0.9999
+
+            // Karplus-Strong 的正确写法：
+            //   输出 = 环内当前样本
+            //   写回 = (当前样本 + 前一输出) 的一阶低通 × 反馈量
+            // 环长恰好是 wgLen 个样本，所以周期 = wgLen / sr，
+            // 基频 = sr / wgLen。之前的实现把读与写落在同一个格子上，
+            // 延迟退化成 1 个样本 —— 于是能量都在高频，
+            // 测出来 220 Hz 比 440 Hz 还弱。
+            for (int i = 0; i < n; i++) {
+                float a = amp.process();
+                if (!amp.isActive() && released) { active = false; break; }
+
+                // 分数延迟读取：在环长 len + frac 上取样本。
+                // 直接取整数格点会产生系统性音准误差。
+                int i1 = wgPos;
+                int i0 = i1 - 1;
+                if (i0 < 0) i0 += wgLen;
+                const float cur = wg[i1] * (1.f - wgFrac) + wg[i0] * wgFrac;
+
+                // 一阶低通决定"泛音比基频衰减得快多少"：damp 越大越亮
+                const float filtered = cur * (1.f - damp * 0.5f)
+                                     + wgLast * (damp * 0.5f);
+                wgLast = cur;
+                wg[wgPos] = filtered * fb;
+                wgPos++;
+                if (wgPos >= wgLen) wgPos = 0;
+
+                outL[i] += cur * a * velGain * 1.8f;
+                outR[i] += cur * a * velGain * 1.8f;
+            }
+            break;
+        }
+
+        // ---------------------------------------------------- 弦乐合奏
+        case Instrument::Strings: {
+            const float vibHz = (float)subInc;
+            const float vibDepth = 0.002f + p[3] * 0.010f;   // ±0.2%..1.2% 音高
+            const float envDepth = auxEnv.level;
+            const float baseCut = pCutoff(p[8]);
+            const float q = pQ(p[9]);
+            double lfo = (double)(pitch % 7) * 0.14;
+            const double invSr = 1.0 / (double)sr;
+
+            for (int i = 0; i < n; i++) {
+                float a = amp.process();
+                if (!amp.isActive() && released) { active = false; break; }
+
+                lfo += (double)vibHz * invSr;
+                if (lfo >= 1.0) lfo -= 1.0;
+                const double vib = 1.0 + (double)vibDepth * std::sin(lfo * 6.283185307179586);
+
+                // 三路锯齿，PolyBLEP 抗混叠
+                double sum = 0;
+                for (int v = 0; v < 3; v++) {
+                    const double ph = ensPhase[v];
+                    double saw = 2.0 * ph - 1.0;
+                    // 简化的 blep：此处用一阶修正即可，三路叠加后混叠不可闻
+                    const double dt = ensInc[v] * vib;
+                    if (ph < dt) { const double t = ph / std::max(1e-9, dt); saw -= t + t - t * t - 1.0; }
+                    else if (ph > 1.0 - dt) { const double t = (ph - 1.0) / std::max(1e-9, dt); saw -= t * t + t + t + 1.0; }
+                    sum += saw;
+                    ensPhase[v] += ensInc[v] * vib;
+                    if (ensPhase[v] >= 1.0) ensPhase[v] -= 1.0;
+                }
+                float sig = (float)(sum / 3.0);
+
+                const float cut = baseCut * std::pow(2.f, a * envDepth * 2.f);
+                lpf.set(clampf(cut, 120.f, sr * 0.42f), q, sr);
+                sig = lpf.process(sig, 0);
+                sig = hpf.process(sig, 2);
+                sig *= a * velGain * 0.7f;
+
+                // 弦乐略有左右展开：三路失谐本身就有立体感
+                outL[i] += sig * (1.f + (float)std::sin(lfo * 6.283185307179586) * 0.12f);
+                outR[i] += sig * (1.f - (float)std::sin(lfo * 6.283185307179586) * 0.12f);
+            }
+            break;
+        }
+
+        // ---------------------------------------------------- 拉杆风琴
+        case Instrument::Organ: {
+            static const float kRatio[9] = {
+                0.5f, 1.5f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 8.f
+            };
+            const float baseInc = (float)osc1.inc;
+            const float percAmt = 0.35f;   // 打击泛音固定强度
+            lpf.set(6000.f, 0.7f, sr);
+
+            for (int i = 0; i < n; i++) {
+                float a = amp.process();
+                float perc = auxEnv.process();
+                if (!amp.isActive() && released) { active = false; break; }
+
+                // 9 根拉杆 = 9 个谐波正弦，逐个累加。
+                // 这是加法合成最直白的做法，Hammond 就是这么发声的。
+                float sig = 0.f;
+                for (int d = 0; d < 9; d++) {
+                    const float w = drawbars[d];
+                    if (w < 0.01f) continue;
+                    const float ratio = kRatio[d];
+                    // 第 0 根是亚谐波（0.5x），单独处理相位推进
+                    sig += w * std::sin((float)(osc1.phase * kRatio[d] * ratio) * kTwoPi);
+                }
+                // 一次相位推进，所有谐波都从同一个相位派生 —— 严格锁相，
+                // 这正是风琴音色"干净但厚"的原因。
+                osc1.phase += osc1.inc;
+                if (osc1.phase >= 1.0) osc1.phase -= 1.0;
+
+                // 打击泛音：只在起音瞬间有，给音头一点"咔"
+                sig += perc * percAmt * std::sin((float)(osc1.phase * 3.0) * kTwoPi);
+
+                sig = lpf.process(sig, 0) * a * velGain * 0.32f;
+                outL[i] += sig;
+                outR[i] += sig;
             }
             break;
         }

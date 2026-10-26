@@ -13,7 +13,13 @@ enum class Instrument : int32_t {
     Drum = 2,
     Bass = 3,
     Bell = 4,
-    EPiano = 5
+    EPiano = 5,
+    // ---- 1.29 追加。全部实时合成，不引入任何采样文件。----
+    // 新增原因：原六种里没有"有明确拨弦/弓弦质感"的音色，
+    // 编曲里要写吉他分解、弦乐铺底、管风琴时只能拿 Synth 硬凑。
+    Pluck = 6,      // Karplus-Strong 数字波导拨弦（吉他/竖琴/古筝类）
+    Strings = 7,    // 失谐锯齿合奏 + 慢起音 + 颤音（弦乐组/铺底）
+    Organ = 8       // 加法合成拉杆风琴（Hammond 式 9 根拉杆）
 };
 
 // 每个发声单元。一个 Voice 一次只演奏一个音，用完即回收。
@@ -51,6 +57,23 @@ struct Voice {
     // FM 用的调制器
     double fmPhase = 0.0, fmInc = 0.0;
     double fmRatio = 1.0, fmIndex = 0.0;
+
+    // ---- Karplus-Strong 拨弦（Pluck）----
+    // 数字波导：一段延迟线 + 一阶低通反馈。这是 1983 年 Karplus 与 Strong
+    // 的原始做法，被整个物理建模领域沿用至今 —— 便宜、稳定、音色像真拨弦。
+    static constexpr int kWgSize = 4096;   // 覆盖到 ~11 Hz，远低于最低音
+    float wg[kWgSize] = {0};
+    int wgPos = 0;
+    int wgLen = 100;
+    /** 分数延迟补偿量 0..1：环长 = wgLen + wgFrac，音准靠它修正 */
+    float wgFrac = 0.f;
+    float wgDamp = 0.5f;
+    float wgLast = 0.f;
+    /** 失谐锯齿合奏（Strings）：三路相位偏移 */
+    double ensPhase[3] = {0.0, 0.33, 0.66};
+    double ensInc[3] = {0.0, 0.0, 0.0};
+    /** 风琴拉杆振幅（9 根，1..8 次谐波 + 亚谐波） */
+    float drawbars[9] = {0};
 
     // 采样播放
     int32_t samplePos = 0;
