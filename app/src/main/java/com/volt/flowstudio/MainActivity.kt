@@ -993,6 +993,7 @@ class MainActivity : Activity() {
             }
         }
         playlist.playheadGlow = if (session.isPlaying()) 1f else 0f
+        playlist.playheadPulse = ornament?.beatPulse ?: 0f
         // 走带条：位置不依赖引擎（引擎坏了也该看到"停在哪"）
         transportBar.positionTicks = pos0
         transportBar.barTicks = session.project.barTicks

@@ -147,8 +147,11 @@ class PlaylistView @JvmOverloads constructor(
 
     /** 播放头贴片（玩偶骑剑）。null 时回退到经典红线+三角。 */
     var playheadSprite: com.volt.flowstudio.ui.PlayheadSprite? = null
-    /** 播放中贴片的辉光脉冲 0..1，由外部 ticker 喂 */
+    /** 播放中贴片的辉光开关 0..1，由外部 ticker 喂 */
     var playheadGlow = 0f
+        set(value) { field = value }
+    /** 节拍脉冲 0..1：辉光随拍点呼吸，不再是恒定的一团 */
+    var playheadPulse = 0f
         set(value) { field = value }
 
     private val scanCache = HashMap<EnvelopeKey, FloatArray>()
@@ -217,7 +220,7 @@ class PlaylistView @JvmOverloads constructor(
             if (i == selectedTrack) {
                 rect(canvas, 0f, top, w, bottom, Palette.withAlpha(Palette.ACCENT, 10))
             }
-            rect(canvas, 0f, top, headerWidth, bottom, Palette.SURFACE)
+            rect(canvas, 0f, top, headerWidth, bottom, CanvasBackdrop.chrome(Palette.SURFACE))
 
             drawTrackHead(canvas, p, i, top, bottom)
             line(canvas, 0f, bottom, w, bottom, Palette.LINE_SOFT, dp(1f))
@@ -298,8 +301,8 @@ class PlaylistView @JvmOverloads constructor(
 
     /** 顶部标尺：数字跳过密排，只有能放下时才标。 */
     private fun drawRuler(canvas: Canvas, w: Float, bw: Float) {
-        rect(canvas, 0f, 0f, w, rulerHeight, Palette.PANEL)
-        rect(canvas, 0f, 0f, headerWidth, rulerHeight, Palette.SURFACE)
+        rect(canvas, 0f, 0f, w, rulerHeight, CanvasBackdrop.chrome(Palette.PANEL))
+        rect(canvas, 0f, 0f, headerWidth, rulerHeight, CanvasBackdrop.chrome(Palette.SURFACE))
         line(canvas, 0f, rulerHeight, w, rulerHeight, Palette.LINE, dp(1f))
 
         val firstBar = (scrollX / bw).toInt()
@@ -515,7 +518,7 @@ class PlaylistView @JvmOverloads constructor(
         // 用户设了玩偶贴片：玩偶骑剑当播放头，剑身细线指示精确时间点
         val sp = playheadSprite
         if (sp?.bitmap != null) {
-            sp.draw(canvas, px, rulerHeight.toFloat(), h.toFloat(), playheadGlow, ::dp)
+            sp.draw(canvas, px, rulerHeight.toFloat(), h.toFloat(), playheadGlow, playheadPulse, ::dp)
             return
         }
 

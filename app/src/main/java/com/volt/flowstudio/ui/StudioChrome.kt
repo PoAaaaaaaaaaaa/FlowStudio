@@ -172,7 +172,8 @@ class EditorToolbar @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
+        // 半透明帽：壁纸从工具栏底下透出（1.33 引入、1.34 恢复时被冲掉，重打）
+        rect(canvas, 0f, 0f, w, h, 0xD116191F.toInt())
         val compact = w < dp(500f)
         val titleWidth = if (compact) dp(84f) else dp(138f)
         label(canvas, clipText(title, titleWidth - dp(16f), sp(11.5f), true),

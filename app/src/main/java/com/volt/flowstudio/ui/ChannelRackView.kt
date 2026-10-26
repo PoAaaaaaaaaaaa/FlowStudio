@@ -117,7 +117,7 @@ class ChannelRackView @JvmOverloads constructor(
         rowHeight = (availH / rows.coerceAtMost(10)).coerceIn(dp(34f), dp(56f))
 
         // ---- 顶部：样式选择 + 摇摆 ----
-        rect(canvas, 0f, 0f, w, headerH, Palette.SURFACE)
+        rect(canvas, 0f, 0f, w, headerH, CanvasBackdrop.chrome(Palette.SURFACE))
         rect(canvas, 0f, headerH - dp(1f), w, headerH, Palette.LINE_SOFT)
         val pat = p.patternAt(currentPatternIndex)
         label(

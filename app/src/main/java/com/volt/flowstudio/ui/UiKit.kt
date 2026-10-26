@@ -143,8 +143,17 @@ object CanvasBackdrop {
      * 保留原色色相（original and 0x00FFFFFF）：各页面底色本来有细微差别，
      * 统一成纯黑会丢掉那层区分。
      */
+    /** 内容区底：46% 不透明（波形与网格需要较深的底）。 */
     fun base(original: Int): Int =
         if (showThrough) (original and 0x00FFFFFF) or 0x76000000.toInt() else original
+
+    /**
+     * chrome 层底（工具栏/标尺/轨道头/读数条）：82% 不透明。
+     * 这些区域画着文字，太透会看不清；但 82% 仍能透出壁纸的 18%，
+     * 全屏看壁纸是"连续变暗"而不是"被切成几块"。
+     */
+    fun chrome(original: Int): Int =
+        if (showThrough) (original and 0x00FFFFFF) or 0xD1000000.toInt() else original
 
     /** canvas.drawColor 的统一入口。 */
     fun fillColor(original: Int): Int = base(original)

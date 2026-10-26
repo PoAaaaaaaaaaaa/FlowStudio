@@ -95,7 +95,7 @@ class TransportBar @JvmOverloads constructor(
                     Palette.withAlpha(Palette.ACCENT, 190), dp(1f))
             }
         } else {
-            rect(canvas, 0f, 0f, w, h, Palette.SURFACE)
+            rect(canvas, 0f, 0f, w, h, 0xD116191F.toInt())
             line(canvas, 0f, h - 0.5f, w, h - 0.5f, Palette.LINE, dp(1f))
         }
         if (bottomMode) drawBottom(canvas, w, h) else drawTop(canvas, w, h)

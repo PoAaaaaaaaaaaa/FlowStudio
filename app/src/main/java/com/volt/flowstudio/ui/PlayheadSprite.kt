@@ -91,6 +91,7 @@ class PlayheadSprite(context: Context) {
             r /= n; g /= n; b /= n
 
             val out = IntArray(w * h)
+            var keyed = 0
             for (i in px.indices) {
                 val p = px[i]
                 val pr = (p shr 16) and 0xFF
@@ -104,7 +105,16 @@ class PlayheadSprite(context: Context) {
                     d < 40 -> (((d - 14) / 26) * 255).toInt()
                     else -> 255
                 }
+                if (a == 0) keyed++
                 out[i] = (a shl 24) or (p and 0x00FFFFFF)
+            }
+            // 抠掉的部分 <5% 说明底色判定失败（照片底/渐变底/深色底）：
+            // 保留原图但整体压到 88% alpha 并加轻微圆角感 —— 仍然可用，不炸
+            if (keyed < w * h * 0.05) {
+                for (i in out.indices) {
+                    val p = out[i]
+                    out[i] = (0xE0 shl 24) or (p and 0x00FFFFFF)
+                }
             }
 
             val cut = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
@@ -159,13 +169,15 @@ class PlayheadSprite(context: Context) {
         rulerBottom: Float,
         rowAreaHeight: Float,
         glow: Float,
+        pulse: Float = 0f,
         dp: (Float) -> Float,
     ) {
         val bmp = bitmap ?: return
         if (bmp.isRecycled) return
 
-        // 目标高度：占据从标尺底往下最多 3 行轨道的高度，且不超过图片清晰缩放下限
-        val targetH = (rowAreaHeight * 0.92f).coerceAtMost(dp(120f))
+        // 目标高度：最多占内容区 92% 与 120dp 的较小者；
+        // 内容区很矮（1 行轨道或横屏）时按可用高度收缩，保证剑尖不超出画面
+        val targetH = (rowAreaHeight * 0.92f).coerceAtMost(dp(120f)).coerceAtLeast(dp(56f))
         val targetW = bmp.width * targetH / bmp.height
 
         // 锚点（剑柄）放在播放头线上；玩偶整体略向右偏，剑身压线
@@ -175,20 +187,28 @@ class PlayheadSprite(context: Context) {
         val left = anchorX - targetW * anchorNX
         val top = anchorY - targetH * anchorNY
 
-        // 播放时的辉光：先铺一层柔和的强调色光晕
+        // 播放时的辉光（1.35 收敛版）。
+        //
+        // 旧版 glow 恒为 1，画一个半径 55% 贴片高、alpha 70 的大圆 ——
+        // 播放全程挂着一团明显的雾，用户反馈"不明亮光伴随"。
+        // 新版三处收敛：
+        //   1. 半径砍半（剑柄周围一小圈，不再罩住整个玩偶）
+        //   2. alpha 上限从 70 降到 34（若有 pulse 则随节拍在 12~34 呼吸）
+        //   3. glow<=0.01 时完全不画 —— 静止零开销
         if (glow > 0.01f) {
+            val a = (if (pulse > 0f) 12f + 22f * pulse else 24f) * glow
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 shader = android.graphics.RadialGradient(
-                    anchorX, anchorY, targetH * 0.55f,
+                    anchorX, anchorY, targetH * 0.28f,
                     intArrayOf(
-                        android.graphics.Color.argb((70 * glow).toInt(), 0x7F, 0xC4, 0xFF),
+                        android.graphics.Color.argb(a.toInt().coerceIn(0, 40), 0x7F, 0xC4, 0xFF),
                         0x00000000
                     ),
                     floatArrayOf(0f, 1f),
                     android.graphics.Shader.TileMode.CLAMP
                 )
             }
-            canvas.drawCircle(anchorX, anchorY, targetH * 0.55f, glowPaint)
+            canvas.drawCircle(anchorX, anchorY, targetH * 0.28f, glowPaint)
         }
 
         canvas.drawBitmap(bmp, null, RectF(left, top, left + targetW, top + targetH), paint)
