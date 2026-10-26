@@ -1448,20 +1448,31 @@ class MainActivity : Activity() {
         com.volt.flowstudio.ui.CanvasBackdrop.showThrough = shouldShow
         bg.invalidate()
 
-        if (shouldShow && bg.backgroundImage == null) {
-            val path = settings.backgroundPath
+        //
+        // 换图必须重载：旧实现只在 backgroundImage == null 时加载，
+        // 用户第二次选图时旧图还在（非 null）→ 两个分支都不走 →
+        // toast 说"已应用"，画面纹丝不动。
+        val wantPath = settings.backgroundPath
+        val needLoad = shouldShow && (bg.backgroundImage == null || bg.loadedPath != wantPath)
+        if (needLoad) {
+            val path = wantPath
+            // 先把旧图摘掉：避免加载期间屏幕上还挂着上一张
+            bg.backgroundImage = null
             Thread {
                 val bmp = runCatching {
                     path?.let { android.graphics.BitmapFactory.decodeFile(it) }
                 }.getOrNull()
-                if (bmp != null) {
-                    ui.post {
+                ui.post {
+                    if (bmp != null) {
+                        bg.loadedPath = path
                         bg.backgroundImage = bmp
-                        bg.invalidate()
                     }
+                    android.util.Log.i("FlowStudio", "背景加载: path=$path 成功=${bmp != null} " +
+                        "尺寸=${bmp?.width}x${bmp?.height}")
                 }
             }.start()
         } else if (!shouldShow) {
+            bg.loadedPath = null
             bg.backgroundImage = null
         }
 

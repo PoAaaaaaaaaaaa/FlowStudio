@@ -37,6 +37,14 @@ class StudioBackground @JvmOverloads constructor(
             invalidate()
         }
 
+    /**
+     * 当前已加载图对应的源路径。
+     *
+     * 用于"换图检测"：仅凭 backgroundImage != null 无法区分
+     * "这张就是设置的那张"和"这是上一张"——后者曾导致换图永远不生效。
+     */
+    var loadedPath: String? = null
+
     /** 背景图额外压暗（用户可在设置里关掉）。 */
     var dim = true
         set(value) { if (field != value) { field = value; invalidate() } }
@@ -78,7 +86,15 @@ class StudioBackground @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val bmp = backgroundImage
         if (bmp != null && !bmp.isRecycled) {
-            if (imgMatrix.isIdentity) rebuildMatrix()
+            if (imgMatrix.isIdentity) {
+                rebuildMatrix()
+                // matrix 仍是 identity 说明 width/height 还没量出来，
+                // 这帧会按原始尺寸画在左上角 —— 记下来便于诊断
+                if (imgMatrix.isIdentity) {
+                    android.util.Log.w("FlowStudio",
+                        "背景绘制时尺寸未就绪 w=$width h=$height")
+                }
+            }
             canvas.drawBitmap(bmp, imgMatrix, imgPaint)
             // 二次压暗。
             //
