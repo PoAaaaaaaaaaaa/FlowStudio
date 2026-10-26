@@ -14,6 +14,110 @@ adb install build/FlowStudio-1.0.0.apk
 
 或者推到 GitHub，Actions 会自动出包（见 `.github/workflows/build.yml`）。
 
+## 1.36 更新
+
+三个用户报的问题，逐个查到根因，都不是表面现象。
+
+### 1. 自定义背景图无法生效
+
+前四轮都在调透明度参数，这次找到了**逻辑上的死结**。
+
+**真因 A：换图时路径不变，加载判据认不出"内容换了"。**
+
+`importBackground` 永远写 `filesDir/theme/background.jpg` —— 固定文件名。
+而加载判据是：
+
+```kotlin
+val needLoad = shouldShow && (bg.backgroundImage == null || bg.loadedPath != wantPath)
+```
+
+第二次选图时 `wantPath` 和 `loadedPath` **是同一个字符串**，`needLoad` 恒为
+`false` → 走 else 分支 → 什么都不做。磁盘上的图确实换了，内存里那张位图没换。
+
+**修法（三层）：**
+
+1. 文件名带序列号 `background-1.jpg` / `background-2.jpg`……路径本身就变了，
+   任何基于路径比对的逻辑都成立；旧图在写完新图之后删掉，磁盘上始终只有一张。
+2. 新增 `backgroundVersion`（每次导入 +1）与 `WallpaperView.loadedVersion`，
+   加载判据改成三条件：`backgroundImage == null || loadedPath != wantPath ||
+   loadedVersion != wantVer`。版本号是"内容真的变了"的唯一可靠信号。
+3. 加载**失败**时清空 `loadedPath` / `loadedVersion`。以前失败不清，
+   下次进来 `loadedPath == wantPath` 成立 → 判定"已加载" → 永远不重试。
+
+**真因 B：导航条是一整条实色横条。**
+
+`MainActivity` 里 `bar.setBackgroundColor(Palette.SURFACE)` —— 48dp 实色，
+壁纸在这一条上完全不可见。前几轮把工具栏、走带条、标尺都改成了半透明帽，
+唯独漏了导航条。
+
+改成 `CanvasBackdrop.chrome(Palette.SURFACE)`，并新增 `refreshChromeTint()`：
+这类用 `setBackgroundColor` 上色的原生容器把颜色**烤进了 Drawable**，
+不读 `CanvasBackdrop`，开关变化时必须手动重设一次才生效。
+
+**真因 C：`invalidate()` 只标脏自己。**
+
+图异步加载完成后只 `invalidate()` 了 `WallpaperView`，父容器和兄弟视图不会因此重画。
+各内容页的 `CanvasBackdrop.showThrough` 是**绘制时**读的，要让每一层重新 `onDraw`
+才看得到新底色。现在图到位后逐层 `postInvalidateOnAnimation()`，合并到同一帧。
+
+**顺带补的入口**：设置副标题一直写着"轻点更换或清除"，但从来没有清除这一项。
+新增「清除背景图」行，同时删磁盘文件、清 prefs、推进版本号。
+
+### 2. 播放时播放头不动，音轨自己滚
+
+1.35 及之前是 `scrollToPlayheadIfNeeded`：
+
+```kotlin
+if (x > w * 0.85f || x < headerWidth) { scrollX = ... }
+```
+
+播放头自己在屏幕上从左跑到右，跑到 85% 处被拽回来一屏。观感就是"播放头在动、
+音轨不动"—— 正好是要改的那种。
+
+改成每帧解一个方程，让播放头的屏幕 x 恒等于锚点（内容区宽度的 30%）：
+
+```
+tickToX(pos) = headerWidth + pos*bw/BAR - scrollX  ≡  锚点x
+⇒ scrollX = pos*bw/BAR - (内容宽 × 0.30)
+```
+
+`scrollX` 为负时钳到 0 —— 曲子开头那几小节画面还没法左移，这时播放头自然
+从左往右走，走到锚点才开始滚。这是所有 DAW 的标准行为；一味钳住反而会让
+开头几秒播放头贴在屏幕中间不动、音轨也不动，看着像卡死。
+
+新增 `followPlayhead(tick)` / `snapToPlayhead(tick)` / `followEnabled`。
+手指按住画面平移时不跟随（`userPanning` 标志），否则手指往左拖、画面每帧被
+拽回右边，就是"拖不动"的那种手感。停下播放后只更新位置、不动滚动 ——
+用户可能正手动画到别处看。
+
+### 3. 每次退出重进多一段音频
+
+**真因 A：补扫投递目录时也往时间线上摆。**
+
+`drainInbox` 走的是 `importAudio` 默认路径，而这个函数默认会把素材
+`placeAudio` 到当前选中轨的播放头位置。于是每启动一次、inbox 里还有残留文件
+（进程被杀时清理回调没跑到），就在时间线上多摆一块。
+
+**真因 B：完全没有内容去重。**
+
+同一个文件改个名就是新素材，重复导入多少次就有多少条素材在池子里。
+
+**修法：**
+
+1. `importAudio` 增加 `placeOnTimeline` 参数。只有用户主动导入走 `true`；
+   `drainInbox` 与 `rescanInbox` 走 `false` —— 补扫的语义是"看看有没有漏掉的
+   素材"，不是"往时间线上再糊一块"。
+2. `AudioAsset` 新增 `fingerprint`（FNV-1a 64 位内容哈希）。导入时先算指纹，
+   池子里有同指纹的直接复用那条素材，不落新文件、不占新缓冲区、也不多摆片段。
+   最多扫 65536 个采样点，三分钟的歌也只多几毫秒。
+3. **存量清理**：`restoreAudio` 在 reload 之后跑一次 `dedupeAudioAssets()`。
+   只修导入路径只能防住"以后不再重复"，用户已经攒下的重复还在工程里 ——
+   打开软件照样看到一堆同名素材。合并规则：同一内容保留 id 最小的那条，
+   引用旧 id 的片段改指过去，完全重合的重复片段去掉，磁盘上的孤儿文件删掉。
+4. `sameContent` 的判据**故意从严**：只认"两边都有指纹且相等"或"路径完全相同"。
+   绝不用"帧数 + 采样率"—— 两首时长恰好相同的歌会撞上，合错了是不可逆的
+   数据丢失；合漏了只是留着一条多余素材。
+
 ## 1.35 更新
 
 ### 背景图第五轮：抓到两处漏网实色

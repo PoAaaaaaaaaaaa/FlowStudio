@@ -37,6 +37,15 @@ class AudioStore(private val context: Context) {
     /** 每个素材的波形峰值，绘制用。降采样到固定桶数。 */
     private val peaks = ConcurrentHashMap<Int, FloatArray>()
 
+    /** 素材元数据，按 id。reload 与 import 都往里放，去重时用它核对。 */
+    private val meta = ConcurrentHashMap<Int, AudioAsset>()
+
+    /** 内容指纹 → 素材 id。导入时的去重索引。 */
+    private val fingerprints = ConcurrentHashMap<String, Int>()
+
+    /** 当前池子里这条素材的指纹（可能由 reload 补算）。空串表示还不知道。 */
+    fun fingerprintOf(assetId: Int): String = meta[assetId]?.fingerprint ?: ""
+
     fun dir(): File = File(context.filesDir, "audio").apply { mkdirs() }
 
     fun peaksOf(assetId: Int): FloatArray = peaks[assetId] ?: FloatArray(0)
@@ -44,13 +53,26 @@ class AudioStore(private val context: Context) {
     /**
      * 导入一个音频文件，登记成素材。
      * 走 SAF 拿到的临时文件也会被拷进应用私有目录，之后不再依赖外部权限。
+     *
+     * 去重：解码后先算内容指纹，池子里已有同指纹的素材就把那条交回去（`reused=true`），
+     * 不再落一份新文件、不再占一份引擎缓冲区。这是"每次退出重进多一段音频"的第一道闸。
      */
     fun import(src: File, displayName: String, nextId: Int,
-               onDone: (AudioAsset?) -> Unit) {
+               onDone: (AudioAsset?, Boolean) -> Unit) {
         io.execute {
             val parsed = runCatching { decode(src) }.getOrNull()
             if (parsed == null) {
-                onDone(null)
+                onDone(null, false)
+                return@execute
+            }
+            val fp = AudioAsset.fingerprintOf(parsed.samples, parsed.frames)
+            val hit = existingByFingerprint(fp)
+            if (hit != null) {
+                android.util.Log.i(
+                    "FlowStudio",
+                    "音频去重：$displayName 与素材 #${hit.id}(${hit.name}) 内容相同，直接复用"
+                )
+                onDone(hit, true)
                 return@execute
             }
             // 文件名保留可读性，前缀 id 保证唯一。
@@ -60,7 +82,7 @@ class AudioStore(private val context: Context) {
                 src.inputStream().use { input -> target.outputStream().use { out -> input.copyTo(out) } }
             }.isSuccess
             if (!copied) {
-                onDone(null)
+                onDone(null, false)
                 return@execute
             }
             val asset = AudioAsset(
@@ -68,23 +90,43 @@ class AudioStore(private val context: Context) {
                 name = displayName,
                 path = target.relativeTo(context.filesDir).path,
                 frames = parsed.frames,
-                sampleRate = parsed.sampleRate
+                sampleRate = parsed.sampleRate,
+                fingerprint = fp
             )
+            // 指纹表要在 onDone 之前就写进去：同一批投递里两个相同文件
+            // 会由单线程串行处理，第二条必须能看到第一条的结果。
+            fingerprints[fp] = nextId
             decoded[nextId] = parsed.samples
             peaks[nextId] = computePeaks(parsed.samples, parsed.frames)
             NativeEngine.instance.setAudioBuffer(nextId, parsed.samples, parsed.frames, parsed.sampleRate)
-            onDone(asset)
+            meta[nextId] = asset
+            onDone(asset, false)
         }
+    }
+
+    /** 按指纹找已登记的素材。找不到返回 null。 */
+    private fun existingByFingerprint(fp: String): AudioAsset? {
+        if (fp.isEmpty()) return null
+        val id = fingerprints[fp] ?: return null
+        // 素材可能被用户删了但指纹表还没清；以 meta 里有记录为准
+        return meta[id]
     }
 
     /** 工程加载后，把用到的素材重新解码进引擎池。 */
     fun reload(assets: List<AudioAsset>, onDone: (() -> Unit)? = null) {
         io.execute {
             for (a in assets) {
+                meta[a.id] = a
+                if (a.fingerprint.isNotEmpty()) fingerprints[a.fingerprint] = a.id
                 if (decoded.containsKey(a.id)) continue
                 val f = File(context.filesDir, a.path)
                 if (!f.isFile) continue
                 val parsed = runCatching { decode(f) }.getOrNull() ?: continue
+                // 老工程没有指纹：顺手补一个，之后去重就能命中
+                if (a.fingerprint.isEmpty()) {
+                    a.fingerprint = AudioAsset.fingerprintOf(parsed.samples, parsed.frames)
+                    if (a.fingerprint.isNotEmpty()) fingerprints[a.fingerprint] = a.id
+                }
                 decoded[a.id] = parsed.samples
                 peaks[a.id] = computePeaks(parsed.samples, parsed.frames)
                 NativeEngine.instance.setAudioBuffer(a.id, parsed.samples, parsed.frames, parsed.sampleRate)
@@ -131,6 +173,8 @@ class AudioStore(private val context: Context) {
     fun clear() {
         decoded.clear()
         peaks.clear()
+        meta.clear()
+        fingerprints.clear()
         NativeEngine.instance.clearAudioClips()
         NativeEngine.instance.clearAudioBuffers()
     }

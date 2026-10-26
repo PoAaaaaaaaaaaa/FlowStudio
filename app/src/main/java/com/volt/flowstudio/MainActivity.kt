@@ -323,7 +323,12 @@ class MainActivity : Activity() {
             orientation = android.widget.LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             setPadding(dp(8), 0, dp(10), 0)
-            setBackgroundColor(Palette.SURFACE)
+            // 半透明帽。此前这里是实色 Palette.SURFACE —— 导航条是每页一条
+            // 48dp 的实色横条，壁纸在这一整条上完全看不到。
+            // 这就是"改了五轮背景还是不像生效"里最后一处漏网的实色。
+            // 用 CanvasBackdrop.chrome() 而不是写死 alpha：它随
+            // showThrough 开关自动在"实色底"与"透出壁纸"之间切换。
+            setBackgroundColor(com.volt.flowstudio.ui.CanvasBackdrop.chrome(Palette.SURFACE))
         }
         navBar = bar
 
@@ -1006,13 +1011,18 @@ class MainActivity : Activity() {
 
         when (currentTab) {
             0 -> {
-                playlist.playheadTick = pos
+                // 播放中走"钉住播放头、音轨滚"的跟随路径；
+                // 停下时只更新位置，不动滚动 —— 用户可能正手动画到别处看。
+                if (session.isPlaying()) {
+                    playlist.followPlayhead(pos)
+                } else {
+                    playlist.playheadTick = pos
+                }
                 // trackLevels() 返回的是 peak*1000 的整数（见 jni_bridge 里的换算），
                 // 这里还原成 0..1 给电平表用。
                 val raw = session.engine.trackLevels()
                 val norm = FloatArray(raw.size) { (raw[it] / 1000f).coerceIn(0f, 1f) }
                 playlist.levels = norm
-                if (session.isPlaying()) playlist.scrollToPlayheadIfNeeded(pos)
             }
             1 -> {
                 rack.playheadTick = pos
@@ -1309,6 +1319,7 @@ class MainActivity : Activity() {
                 settings,
                 applier = settingsApplier,
                 onPickBackground = { pickBackgroundImage() },
+                onClearBackground = { clearBackgroundImage() },
                 onPickPlayhead = { pickPlayheadImage() },
                 onShowDiagnostics = { showDiagnostics() },
                 onShowGuide = { showGestureGuide() },
@@ -1410,6 +1421,20 @@ class MainActivity : Activity() {
             .onFailure { toast("这台设备没有可用的图片选择器") }
     }
 
+    /** 清除自定义背景：删磁盘文件 + 清 prefs + 回到默认渐变。 */
+    private fun clearBackgroundImage() {
+        settings.clearBackground()
+        com.volt.flowstudio.session.AppSettings.purgeOldBackgrounds(filesDir, null)
+        // 版本号也推进：让 WallpaperView 的"已加载"记录彻底作废，
+        // 否则清除后再选同一张图，loadedVersion 可能刚好对上而不重载。
+        settings.backgroundVersion = settings.backgroundVersion + 1
+        applyBackground()
+        backgroundView?.invalidate()
+        settingsWindow?.dismiss()
+        settingsWindow = null
+        toast("背景已清除，回到默认渐变")
+    }
+
     /**
      * 处理选中的背景图：解码 → 交给 AppSettings 做去饱和/压暗/加渐变压边 → 落盘 → 应用。
      *
@@ -1443,6 +1468,13 @@ class MainActivity : Activity() {
                     return@Runnable
                 }
                 settings.backgroundPath = result
+                // 版本号必须在路径之后 +1：applyBackground 内部拿它和
+                // WallpaperView.loadedVersion 比对，决定要不要重新解码。
+                // 没有这一步，同一路径换图会被判成"已加载"而静默跳过。
+                settings.backgroundVersion = settings.backgroundVersion + 1
+                // 旧图清掉，磁盘上只留当前这张
+                com.volt.flowstudio.session.AppSettings
+                    .purgeOldBackgrounds(filesDir, result)
                 applyBackground()
                 // 给出可见的确认：toast 之外，把壁纸层强制重绘一轮
                 backgroundView?.invalidate()
@@ -1507,16 +1539,25 @@ class MainActivity : Activity() {
         com.volt.flowstudio.ui.CanvasBackdrop.showThrough = shouldShow
         bg.invalidate()
 
+        // 换图必须重载。
         //
-        // 换图必须重载：旧实现只在 backgroundImage == null 时加载，
-        // 用户第二次选图时旧图还在（非 null）→ 两个分支都不走 →
-        // toast 说"已应用"，画面纹丝不动。
+        // 判据里要**版本号**，不能只看路径：1.35 起文件名带序列号，路径本身会变，
+        // 但万一以后又改回固定名，只比路径就又会退化成"换图不生效"。
+        // 版本号是内容真正变了的唯一可靠信号（每次导入 +1）。
+        //
+        // 另一处：加载**失败**时必须清 loadedPath，否则下次进来
+        // `bg.loadedPath == wantPath` 成立 → 判定"已加载" → 永远不重试。
         val wantPath = settings.backgroundPath
-        val needLoad = shouldShow && (bg.backgroundImage == null || bg.loadedPath != wantPath)
+        val wantVer = settings.backgroundVersion
+        val needLoad = shouldShow &&
+            (bg.backgroundImage == null || bg.loadedPath != wantPath || bg.loadedVersion != wantVer)
         if (needLoad) {
             val path = wantPath
+            val ver = wantVer
             // 先把旧图摘掉：避免加载期间屏幕上还挂着上一张
             bg.backgroundImage = null
+            bg.loadedPath = null
+            bg.loadedVersion = -1
             Thread {
                 val bmp = runCatching {
                     path?.let { android.graphics.BitmapFactory.decodeFile(it) }
@@ -1524,14 +1565,30 @@ class MainActivity : Activity() {
                 ui.post {
                     if (bmp != null) {
                         bg.loadedPath = path
+                        bg.loadedVersion = ver
                         bg.backgroundImage = bmp
                     }
-                    android.util.Log.i("FlowStudio", "背景加载: path=$path 成功=${bmp != null} " +
-                        "尺寸=${bmp?.width}x${bmp?.height}")
+                    android.util.Log.i("FlowStudio", "背景加载: path=$path ver=$ver " +
+                        "成功=${bmp != null} 尺寸=${bmp?.width}x${bmp?.height}")
+                    // 图到位后必须把整棵视图树重绘一遍。
+                    //
+                    // 光 invalidate() WallpaperView 不够：内容页各自持有
+                    // CanvasBackdrop.showThrough 编译出的颜色，那是**绘制时**读的，
+                    // 所以要让每一层重新 onDraw 才看得到新底色。
+                    // invalidate() 只标记自身，父容器不会因此重画；
+                    // 这里逐层标脏，且用 postInvalidateOnAnimation 让它们合并到同一帧。
+                    if (::content.isInitialized) content.postInvalidateOnAnimation()
+                    rootLayout?.postInvalidateOnAnimation()
+                    if (::rack.isInitialized) rack.postInvalidateOnAnimation()
+                    if (::playlist.isInitialized) playlist.postInvalidateOnAnimation()
+                    if (::piano.isInitialized) piano.postInvalidateOnAnimation()
+                    if (::mixer.isInitialized) mixer.postInvalidateOnAnimation()
+                    if (::keys.isInitialized) keys.postInvalidateOnAnimation()
                 }
             }.start()
         } else if (!shouldShow) {
             bg.loadedPath = null
+            bg.loadedVersion = -1
             bg.backgroundImage = null
         }
 
@@ -1549,6 +1606,24 @@ class MainActivity : Activity() {
         if (::piano.isInitialized) piano.invalidate()
         if (::mixer.isInitialized) mixer.invalidate()
         if (::keys.isInitialized) keys.invalidate()
+        // 导航条底色是 setBackgroundColor 设的（不是 Canvas 画出来的），
+        // 它不读 CanvasBackdrop，所以必须在开关变化时手动重设一次。
+        refreshChromeTint()
+    }
+
+    /**
+     * 把受 CanvasBackdrop 控制的原生 View 底色重设一遍。
+     *
+     * 自绘的 View（播放列表、机架、卷帘…）在 onDraw 里实时读 showThrough，
+     * 只要重绘就生效。但导航条这类用 setBackgroundColor 上色的原生容器
+     * 把颜色**烤进了 Drawable**，开关变了不重设就永远是老颜色 ——
+     * 壁纸在它底下看得见看不见，取决于这一次有没有重新赋值。
+     */
+    private fun refreshChromeTint() {
+        navBar?.setBackgroundColor(
+            com.volt.flowstudio.ui.CanvasBackdrop.chrome(Palette.SURFACE)
+        )
+        navBar?.invalidate()
     }
 
     private fun applyKeepAwake() {

@@ -771,6 +771,7 @@ class SettingsWindow(
     private val settings: com.volt.flowstudio.session.AppSettings,
     private val applier: SettingsApplier,
     private val onPickBackground: () -> Unit,
+    private val onClearBackground: () -> Unit,
     private val onPickPlayhead: () -> Unit,
     private val onShowDiagnostics: () -> Unit,
     private val onShowGuide: () -> Unit,
@@ -804,10 +805,21 @@ class SettingsWindow(
                 ),
                 SettingRow(
                     title = "自定义背景图",
-                    subtitle = if (settings.backgroundPath != null) "已设置 · 轻点更换或清除" else "选一张图，自动套用本软件的暗色调",
+                    subtitle = if (settings.backgroundPath != null) "已设置 · 轻点更换" else "选一张图，自动套用本软件的暗色调",
                     kind = SettingKind.VALUE,
                     valueText = if (settings.backgroundPath != null) "更换" else "选择",
                     onClick = onPickBackground,
+                ),
+                SettingRow(
+                    // 副标题一直写着"可清除"但从来没有这个入口 —— 现在补上。
+                    // 不用 SWITCH 之类的新控件：设置行已有 NAVIGATE 语义（点了就执行）。
+                    title = "清除背景图",
+                    subtitle = if (settings.backgroundPath != null)
+                        "回到默认渐变 · 当前 ${settings.backgroundPath!!.substringAfterLast('/')}"
+                    else "当前未设置背景图",
+                    kind = SettingKind.VALUE,
+                    valueText = if (settings.backgroundPath != null) "清除" else "—",
+                    onClick = if (settings.backgroundPath != null) onClearBackground else null,
                 ),
                 SettingRow(
                     title = "背景压暗",

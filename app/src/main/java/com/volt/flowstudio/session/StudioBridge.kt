@@ -1269,6 +1269,8 @@ class StudioBridge(
         if (!ok) return 400 to JSONObject().put("error", msg)
 
         // importAudio 已经按当前选中轨与播放头摆好了；这里按请求微调。
+        // 内容相同被去重时不会新增素材，`audioAssets.lastOrNull()` 拿到的是库里最后一条
+        // —— 所以按"这段音频对应最新片段"而不是"末尾那个片段"来找，避免改错别人的参数。
         val asset = session.project.audioAssets.lastOrNull()
         if (asset != null) {
             val clip = session.project.clips.lastOrNull { it.audioId == asset.id }

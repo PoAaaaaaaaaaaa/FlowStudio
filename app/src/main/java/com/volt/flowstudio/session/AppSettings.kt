@@ -46,6 +46,21 @@ class AppSettings(context: Context) {
     /** 供 SettingsWindow 直接改完统一落盘（部分字段用 setter 已即时保存）。 */
     fun save() { /* 字段 setter 已各自落盘，这里保留给未来批量写入 */ }
 
+    /**
+     * 背景图版本号。
+     *
+     * 为什么必须有它：`importBackground` 永远写同一个文件名
+     * `filesDir/theme/background.jpg`（"更换"的语义就是替换）。
+     * 于是用户第二次选图时，`backgroundPath` 这个字符串**和上一次完全一样**，
+     * 而加载判据是 `loadedPath != wantPath` —— 两个字符串相等 → 判定"不用重载"
+     * → 画面纹丝不动。磁盘上的文件确实换了，内存里那张位图没换。
+     *
+     * 这就是"设置提示成功、图也存下来了、界面就是不变"的最后一道锁。
+     * 现在每次导入都 +1，加载判据里带上它，路径相同也能识别出"内容换了"。
+     */
+    var backgroundVersion: Int = prefs.getInt(KEY_BG_VER, 0)
+        internal set(v) { field = v; prefs.edit().putInt(KEY_BG_VER, v).apply() }
+
     /** 背景图处理完的信号：让界面重绘。 */
     fun hasBackground(): Boolean {
         val p = backgroundPath
@@ -75,6 +90,7 @@ class AppSettings(context: Context) {
 
     companion object {
         private const val KEY_BG = "bg_path"
+        private const val KEY_BG_VER = "bg_ver"
         private const val KEY_DIM = "bg_dim"
         private const val KEY_ORN = "ornaments"
         private const val KEY_METRO = "metronome"
@@ -212,22 +228,49 @@ class AppSettings(context: Context) {
          * 文件一没，hasBackground() 返回 false，壁纸静默回到渐变；
          * 而 prefs 里的路径还留着，设置界面仍显示"已设置"——
          * 用户看到的就是"选了图提示成功，界面却什么都没有"。
+         *
+         * 文件名带序列号（background-1.jpg、background-2.jpg…）：
+         * 固定文件名会让"更换"变成路径不变、内容变了，加载判据认不出来。
+         * 带序列号之后路径本身就是变化的，任何基于路径比对的逻辑都成立。
+         * 旧文件在写完新图之后删掉，磁盘上始终只有一张。
          */
         fun importBackground(src: Bitmap, filesDir: File): String? {
             val processed = processBackground(src) ?: return null
             val dir = File(filesDir, "theme")
             if (!dir.isDirectory && !dir.mkdirs()) return null
-            // 固定文件名：设置里"更换"语义就是替换，不需要历史版本
-            val f = File(dir, "background.jpg")
+
+            // 序列号：取现有 background-*.jpg 里最大的编号 +1
+            val seq = (dir.listFiles { f ->
+                f.isFile && f.name.startsWith("background-") && f.name.endsWith(".jpg")
+            }?.mapNotNull { f ->
+                f.name.removePrefix("background-").removeSuffix(".jpg").toIntOrNull()
+            }?.maxOrNull() ?: 0) + 1
+            val f = File(dir, "background-$seq.jpg")
+
             val ok = runCatching {
                 f.outputStream().use { os ->
                     processed.compress(Bitmap.CompressFormat.JPEG, 90, os)
                 }
             }.isSuccess
-            if (!ok) return null
+            if (!ok) {
+                runCatching { f.delete() }
+                return null
+            }
             android.util.Log.i("FlowStudio", "背景已写入 ${f.absolutePath} " +
                 "${f.length() / 1024}KB")
             return f.absolutePath
+        }
+
+        /** 清掉除 [keep] 之外的所有历史背景图。换图成功后调用。 */
+        fun purgeOldBackgrounds(filesDir: File, keep: String?) {
+            val dir = File(filesDir, "theme")
+            val keepName = keep?.let { File(it).name }
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && f.name.endsWith(".jpg") && f.name != keepName) {
+                    // 兼容 1.35 及更早的固定文件名 background.jpg
+                    runCatching { f.delete() }
+                }
+            }
         }
     }
 }

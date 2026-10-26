@@ -439,27 +439,110 @@ class StudioSession(private val context: Context) {
     fun restoreAudio() {
         audioStore.reload(project.audioAssets) {
             main.post {
+                // 加载完成后先做一次存量去重：1.35 及更早的工程里可能已经
+                // 攒下同一段音频的多条素材（重复投递造成的），这里把它们
+                // 合并成一条，并让引用旧 id 的片段改指到保留的那条。
+                // 必须放在 reload 之后：那时指纹才算得出来。
+                val merged = dedupeAudioAssets()
+                if (merged > 0) {
+                    android.util.Log.i("FlowStudio", "存量去重：合并了 $merged 条重复音频素材")
+                    scheduleAutoSave()
+                }
                 audioStore.pushClips(project)
                 onAudioChanged?.invoke()
             }
         }
     }
 
-    /** 导入一段音频成素材，并立刻摆到当前选中轨道的播放头位置。 */
+    /**
+     * 合并工程里内容相同的音频素材，返回合并掉的条数。
+     *
+     * 为什么必须有这一步：只修导入路径只能防住"以后不再重复"，
+     * 用户已经攒下的那些重复还在工程里 —— 打开软件照样看到一堆同名素材、
+     * 时间线上一堆叠着的片段。修 bug 而不清理存量，等于没修完。
+     *
+     * 规则：
+     *   - 同一内容只保留 id 最小的那条（最老的，引用它最安全）；
+     *   - 引用被删素材的片段改指到保留的那条，位置不动；
+     *   - 被删素材在磁盘上的文件一并删掉，别留孤儿；
+     *   - 内容判定用 AudioAsset.sameContent（指纹优先，缺指纹退化为帧数+采样率）。
+     */
+    private fun dedupeAudioAssets(): Int {
+        val assets = project.audioAssets
+        if (assets.size < 2) return 0
+        val keep = ArrayList<AudioAsset>()
+        val replaced = HashMap<Int, Int>()   // 旧 id → 保留的 id
+        for (a in assets.sortedBy { it.id }) {
+            val dup = keep.firstOrNull { it.sameContent(a) }
+            if (dup == null) {
+                keep.add(a)
+            } else {
+                replaced[a.id] = dup.id
+            }
+        }
+        if (replaced.isEmpty()) return 0
+
+        // 片段改指：同轨同位置同素材的重复片段一并去掉，避免两个片段叠在一起
+        val seen = HashSet<String>()
+        val keptClips = ArrayList<com.volt.flowstudio.model.Clip>(project.clips.size)
+        for (c in project.clips) {
+            val newId = replaced[c.audioId]
+            if (newId != null) c.audioId = newId
+            if (c.isAudio) {
+                val sig = "${c.audioId}:${c.track}:${c.start}:${c.length}"
+                if (!seen.add(sig)) continue   // 完全重合的重复片段，丢掉后面的
+            }
+            keptClips.add(c)
+        }
+        project.clips.clear()
+        project.clips.addAll(keptClips)
+
+        // 素材表收缩 + 磁盘文件清理
+        for ((oldId, _) in replaced) {
+            val victim = assets.firstOrNull { it.id == oldId } ?: continue
+            runCatching { File(context.filesDir, victim.path).delete() }
+        }
+        assets.removeAll { replaced.containsKey(it.id) }
+        return replaced.size
+    }
+
+    /**
+     * 导入一段音频成素材，并立刻摆到当前选中轨道的播放头位置。
+     *
+     * `placeOnTimeline=false` 用于"恢复/补扫"这类不该往时间线上加东西的路径 ——
+     * 之前投递目录的补扫也走这里，于是每次重开软件都会在时间线上多摆一块，
+     * 这正是用户报的"重进多一段音频"的第二条来源。
+     */
     fun importAudio(src: File, displayName: String,
+                    placeOnTimeline: Boolean = true,
                     onDone: ((Boolean, String) -> Unit)? = null) {
         val nextId = project.nextAudioId
         project.nextAudioId = nextId + 1
-        audioStore.import(src, displayName, nextId) { asset ->
+        audioStore.import(src, displayName, nextId) { asset, reused ->
             main.post {
                 if (asset == null) {
                     // 导入失败要把号还回去，否则 id 会一直虚涨。
                     if (project.nextAudioId == nextId + 1) project.nextAudioId = nextId
                     onDone?.invoke(false, "无法解码这个音频：支持 WAV / MP3 / M4A / FLAC / OGG")
                 } else {
-                    project.audioAssets.add(asset)
-                    val track = project.selectedTrack.coerceIn(0, maxOf(0, project.tracks.size - 1))
-                    project.placeAudio(asset, track, positionTicks())
+                    // 复用已存在的素材时，id 号段没有被消耗，退回去
+                    if (reused && project.nextAudioId == nextId + 1) project.nextAudioId = nextId
+                    if (project.audioAssetById(asset.id) == null) {
+                        project.audioAssets.add(asset)
+                    }
+                    if (reused) {
+                        // 内容相同：不再重复摆片段，直接告诉调用方"这段已经在库里了"
+                        scheduleAutoSave()
+                        onDone?.invoke(true,
+                            "${asset.name} · 库里已有同一段音频（#${asset.id}），未重复添加")
+                        onAudioChanged?.invoke()
+                        return@post
+                    }
+                    if (placeOnTimeline) {
+                        val track = project.selectedTrack
+                            .coerceIn(0, maxOf(0, project.tracks.size - 1))
+                        project.placeAudio(asset, track, positionTicks())
+                    }
                     scheduleAutoSave()
                     onDone?.invoke(true, "${asset.name} · ${"%.1f".format(asset.durationSec)} 秒")
                     onAudioChanged?.invoke()
@@ -526,7 +609,10 @@ class StudioSession(private val context: Context) {
                 if (!f.isFile || f.length() < 1024) return
                 // 从回调里直接导入：importAudio 自己会切 io 线程，
                 // 但 UI 回调（onAudioChanged）必须回主线程，它内部已经处理。
-                importAudio(f, path) { ok, msg ->
+                //
+                // placeOnTimeline=true：用户主动投递的音频就该立刻出现在时间线上。
+                // 重复投递同一段音频会被内容指纹拦下（reused），不会多摆一块。
+                importAudio(f, path, placeOnTimeline = true) { ok, msg ->
                     // 无论成败都把投递文件删掉：成功是已经进了素材库，
                     // 失败是留着也没有用（每次启动还会再失败一次）。
                     runCatching { f.delete() }
@@ -543,7 +629,20 @@ class StudioSession(private val context: Context) {
         drainInbox()
     }
 
-    /** 把 inbox 里积压的文件全部导入（App 启动时调用）。 */
+    /**
+     * 把 inbox 里积压的文件全部导入（App 启动时调用）。
+     *
+     * 这里**不摆到时间线**（placeOnTimeline=false）。
+     *
+     * 这是"每次退出重进多一段音频"的主要来源：补扫原本走的是同一个
+     * importAudio 默认路径，于是每启动一次就把积压文件往时间线上摆一块，
+     * 而投递文件如果因为进程被杀没被删掉，下次启动还会再摆一块 ——
+     * 同一段素材在列表里越叠越多。
+     *
+     * 现在两道闸：
+     *   1. 补扫只进素材库，不碰时间线；
+     *   2. 内容指纹去重，同一段音频无论投递多少次都只有一条素材。
+     */
     private fun drainInbox() {
         val dir = inboxDir()
         // listFiles 返回 null 有两种含义：目录不存在，或没有读权限。
@@ -558,7 +657,7 @@ class StudioSession(private val context: Context) {
         }
         val files = all.filter { it.isFile && it.length() > 1024 }
         for (f in files) {
-            importAudio(f, f.name) { ok, msg ->
+            importAudio(f, f.name, placeOnTimeline = false) { ok, msg ->
                 runCatching { f.delete() }
                 if (!ok) android.util.Log.w("FlowStudio", "积压投递导入失败 ${f.name}: $msg")
             }
@@ -637,7 +736,9 @@ class StudioSession(private val context: Context) {
         if (files.isEmpty()) return
         android.util.Log.i("FlowStudio", "补扫投递目录：${files.size} 个文件")
         for (f in files) {
-            importAudio(f, f.name) { ok, msg ->
+            // 补扫同样只进素材库：这是"按一下重扫"的动作，
+            // 用户想要的是"看看有没有漏掉的"，不是"往时间线上再糊一块"。
+            importAudio(f, f.name, placeOnTimeline = false) { ok, msg ->
                 runCatching { f.delete() }
                 if (!ok) android.util.Log.w("FlowStudio", "投递导入失败 ${f.name}: $msg")
             }

@@ -35,6 +35,23 @@ class PlaylistView @JvmOverloads constructor(
     var playheadTick: Int = 0
         set(v) { if (field != v) { field = v; invalidate() } }
 
+    /**
+     * 播放跟随模式：播放头钉在屏幕上不动，音轨自己往左滚。
+     *
+     * 1.35 及之前是"跑到屏幕右侧 85% 才跳一屏"（scrollToPlayheadIfNeeded），
+     * 观感就是播放头自己在屏幕上跑、跑到边上被拽回来 —— 正好是用户反馈要改的
+     * 那种。这里改成每帧解一个方程，让播放头的屏幕 x 恒等于锚点：
+     *
+     *   tickToX(pos) = headerWidth + pos*bw/BAR - scrollX  ≡  锚点x
+     *   ⇒ scrollX = pos*bw/BAR - (内容宽 × 锚点比例)
+     *
+     * scrollX 为负时钳到 0 —— 曲子刚开头那几小节，画面还没法左移，
+     * 这时播放头自然地从左往右走，走到锚点才开始滚。这是所有 DAW 的标准行为，
+     * 一味钳住反而会让开头几秒的播放头贴在屏幕中间不动、音轨又不动，看着像卡死。
+     */
+    var followEnabled: Boolean = true
+        set(v) { field = v; invalidate() }
+
     var selectedTrack: Int = 0
         set(v) { field = v; invalidate() }
 
@@ -105,6 +122,8 @@ class PlaylistView @JvmOverloads constructor(
     private var downX = 0f
     private var downY = 0f
     private var moved = false          // 是否已越过拖动阈值
+    /** 手指正按着画面平移：此时暂停播放跟随，避免和手势抢 scrollX。 */
+    private var userPanning = false
     private var lastTapTime = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
@@ -700,6 +719,8 @@ class PlaylistView @JvmOverloads constructor(
                     Drag.PAN -> {
                         val mx = if (e.pointerCount >= 2) (e.getX(0) + e.getX(1)) / 2f else e.x
                         val my = if (e.pointerCount >= 2) (e.getY(0) + e.getY(1)) / 2f else e.y
+                        // 手指按住的时候不跟随：否则播放中每帧都在和手指抢 scrollX
+                        userPanning = true
                         scrollX = (scrollX - (mx - panX)).coerceAtLeast(0f)
                         scrollY = (scrollY - (my - panY))
                             .coerceIn(0f, max(0f, contentH - height + rulerHeight))
@@ -750,6 +771,8 @@ class PlaylistView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val wasPinch = pinchActive
                 pinchActive = false
+                // 手指离开：交还画面控制权给跟随逻辑
+                userPanning = false
                 if (wasPinch) {
                     // 捏合结束后不要触发"空点导入"或"片段改动"这类副作用
                     drag = Drag.NONE
@@ -884,5 +907,36 @@ class PlaylistView @JvmOverloads constructor(
             scrollX = (tick * barWidth() / Note.BAR - (w - headerWidth) * 0.3f).coerceAtLeast(0f)
             invalidate()
         }
+    }
+
+    // ------------------------------------------------------------ 跟随播放
+
+    /**
+     * 播放中的每帧对齐：播放头钉住，音轨滚动。
+     *
+     * 和 scrollToPlayheadIfNeeded 的区别是"每帧强制"与"越界才修正"。
+     * 这里不做过渡动画 —— 音频位置本来就是跳着给的（每 33ms 一次 ticker），
+     * 再加一层弹簧只会让画面追不上声音。
+     */
+    fun followPlayhead(tick: Int, anchorRatio: Float = 0.30f) {
+        playheadTick = tick
+        if (!followEnabled || userPanning) return
+        val bw = barWidth()
+        val contentW = (width - headerWidth).coerceAtLeast(1f)
+        val anchor = contentW * anchorRatio.coerceIn(0.05f, 0.95f)
+        val want = tick * bw / Note.BAR - anchor
+        val clamped = want.coerceIn(0f, maxScrollX())
+        if (abs(clamped - scrollX) > 0.4f) {
+            scrollX = clamped
+            invalidate()
+        }
+    }
+
+    /** 恢复到"跟随"状态（例如用户按了定位到播放头）。 */
+    fun snapToPlayhead(tick: Int, anchorRatio: Float = 0.30f) {
+        val bw = barWidth()
+        val contentW = (width - headerWidth).coerceAtLeast(1f)
+        scrollX = (tick * bw / Note.BAR - contentW * anchorRatio).coerceIn(0f, maxScrollX())
+        invalidate()
     }
 }

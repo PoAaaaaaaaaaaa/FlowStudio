@@ -57,6 +57,15 @@ class WallpaperView @JvmOverloads constructor(
     /** 当前已加载图对应的源路径（换图检测用）。 */
     var loadedPath: String? = null
 
+    /**
+     * 当前已加载图对应的版本号。
+     *
+     * 路径可能不变而内容变了（文件名固定时"更换"就是覆盖同一路径），
+     * 只比路径会漏掉这种情况。版本号由 AppSettings 每次导入 +1，
+     * 是"这张位图是不是最新那张"的唯一可靠判据。
+     */
+    var loadedVersion: Int = -1
+
     /** 是否额外压暗（设置里的"背景压暗"）。 */
     var dim = true
         set(value) { if (field != value) { field = value; invalidate() } }
